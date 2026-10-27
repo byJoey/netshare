@@ -1,0 +1,6 @@
+/dist/
+*.test
+*.out
+.DS_Store
+config.local.json
+secrets/

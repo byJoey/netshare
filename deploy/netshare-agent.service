@@ -1,0 +1,33 @@
+[Unit]
+Description=NetShare 私网映射节点
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/netshare agent --config /etc/netshare-agent/agent.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+UMask=0077
+StateDirectory=netshare-agent
+StateDirectoryMode=0700
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=false
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/netshare-agent /etc/sysctl.d /proc/sys/net/ipv4
+
+[Install]
+WantedBy=multi-user.target

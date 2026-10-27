@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="NetShare 私网端口映射管理台">
+  <title>NetShare · 私网映射</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23175eb8'/%3E%3Cpath d='M8 11h16m-4-4 4 4-4 4M24 21H8m4-4-4 4 4 4' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="i-network" viewBox="0 0 24 24"><path d="M4 7h16m-4-4 4 4-4 4M20 17H4m4-4-4 4 4 4"/></symbol>
+    <symbol id="i-map" viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="6" rx="1.5"/><rect x="14" y="14" width="7" height="6" rx="1.5"/><path d="M6.5 10v7H14m-3-3 3 3-3 3"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 2.6 7M3 4v7h7m2-5v6l4 2"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5m-4-4a8 8 0 0 1 13-3l2 2M4 17l2 2a8 8 0 0 0 13-3"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+    <symbol id="i-exit" viewBox="0 0 24 24"><path d="M9 4H4v16h5m5-12 4 4-4 4m-5-4h11"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="m12 3 10 18H2L12 3Zm0 6v5m0 3h.01"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 6-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 2 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/></symbol>
+  </defs></svg>
+
+  <div id="boot" class="boot" role="status"><span class="brand-mark"><svg class="icon"><use href="#i-network"/></svg></span><p>正在连接管理台…</p><button id="boot-retry" class="button secondary" hidden>重新连接</button></div>
+
+  <main id="login-view" class="login-view" hidden>
+    <div class="login-card">
+      <div class="login-brand"><span class="brand-mark"><svg class="icon"><use href="#i-network"/></svg></span><span>NetShare</span></div>
+      <h1>登录管理台</h1>
+      <p class="login-intro">管理公网入口与私网服务之间的映射。</p>
+      <form id="login-form">
+        <div class="field"><label for="login-username">账号</label><input id="login-username" name="username" autocomplete="username" required maxlength="80" autofocus></div>
+        <div class="field"><label for="login-password">密码</label><div class="password-field"><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256"><button id="password-visibility" type="button" aria-label="显示密码" aria-pressed="false">显示</button></div></div>
+        <p id="login-error" class="form-error" role="alert" hidden></p>
+        <button id="login-submit" type="submit" class="button primary login-submit">登录</button>
+      </form>
+      <div class="login-foot"><svg class="icon"><use href="#i-shield"/></svg><span>受保护的私网映射控制台</span></div>
+    </div>
+    <p class="login-version" data-version>NetShare</p>
+  </main>
+
+  <div id="app" class="app" hidden>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <aside class="sidebar">
+      <a class="brand" href="#mappings" aria-label="NetShare 映射管理"><span class="brand-mark"><svg class="icon"><use href="#i-network"/></svg></span><span>NetShare<small>私网映射</small></span></a>
+      <nav class="navigation" aria-label="主导航">
+        <button class="nav-button active" data-view="mappings" aria-current="page"><svg class="icon"><use href="#i-map"/></svg><span>端口映射</span><span id="nav-count" class="nav-count">—</span></button>
+        <button class="nav-button" data-view="nodes"><svg class="icon"><use href="#i-server"/></svg><span>机器状态</span></button>
+        <button class="nav-button" data-view="events"><svg class="icon"><use href="#i-history"/></svg><span>操作记录</span></button>
+      </nav>
+      <div class="sidebar-foot"><span class="foot-dot"></span><span>公网接入 · 私网转发</span><small data-version>NetShare</small></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><div class="workspace-label"><span class="workspace-root">网络工作区</span><span class="workspace-separator">/</span><span id="topbar-location">端口映射</span></div><div class="account"><svg class="icon"><use href="#i-user"/></svg><span id="current-user"></span><button id="password-change" class="text-button">修改密码</button><button id="logout" class="icon-button" title="退出登录" aria-label="退出登录"><svg class="icon"><use href="#i-exit"/></svg></button></div></header>
+      <main id="main-content" tabindex="-1">
+        <div class="page-header"><div><h1 id="page-title">端口映射</h1><p id="page-description">让一台机器的公网入口，连接另一台的私网服务。</p></div><div class="page-utilities"><button id="export" class="button secondary"><svg class="icon"><use href="#i-download"/></svg><span>导出配置</span></button><button id="reconcile" class="button secondary" data-mutate><svg class="icon"><use href="#i-refresh"/></svg><span>同步规则</span></button></div></div>
+        <div class="refresh-line"><label class="auto-refresh"><input id="auto-refresh" type="checkbox" checked><span>自动刷新</span></label><span id="last-updated">正在获取状态…</span><button id="refresh" class="text-button"><svg class="icon"><use href="#i-refresh"/></svg><span>刷新</span></button></div>
+        <div id="page-error" class="notice error" role="alert" hidden><svg class="icon"><use href="#i-alert"/></svg><p id="page-error-text"></p><button id="error-retry" class="text-button">重试</button></div>
+        <div id="operation-status" class="notice" role="status" hidden><svg class="icon"><use href="#i-refresh"/></svg><p>正在应用变更，完成后会自动更新。请等待当前操作完成。</p></div>
+
+        <section id="view-mappings" aria-label="端口映射">
+          <div id="network-strip" class="network-strip" aria-label="机器私网连接"></div>
+          <div id="mapping-layout" class="mapping-layout">
+            <div class="mapping-main">
+              <div class="section-heading"><div><h2>映射规则 <span id="mapping-total" class="count-badge">—</span></h2><p id="mapping-summary">正在读取规则</p></div><button id="new-mapping" class="button primary" data-mutate><svg class="icon"><use href="#i-plus"/></svg>新建映射</button></div>
+              <div class="filters"><label class="search-field"><svg class="icon"><use href="#i-search"/></svg><span class="sr-only">搜索映射</span><input id="mapping-search" type="search" placeholder="搜索名称、IP 或端口" autocomplete="off"></label><label><span class="sr-only">入口机器</span><select id="source-filter"><option value="">全部入口</option></select></label><label><span class="sr-only">映射状态</span><select id="status-filter"><option value="">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option><option value="pending">待同步</option></select></label></div>
+              <div id="mapping-loading" class="loading-rows" role="status" aria-label="正在加载映射"><div></div><div></div><div></div></div>
+              <div id="mapping-empty" class="empty-state" hidden><span class="empty-icon"><svg class="icon"><use href="#i-map"/></svg></span><h3 id="empty-title">还没有映射</h3><p id="empty-description">选择公网入口与私网目标，创建第一条端口映射。</p><button id="empty-new" class="button secondary" data-mutate>新建映射</button><button id="clear-filters" class="text-button" hidden>清除筛选</button></div>
+              <div id="mapping-table-wrap" class="table-wrap" hidden><table class="mapping-table"><caption class="sr-only">公网入口到私网目标的映射规则</caption><thead><tr><th scope="col">映射与路径</th><th scope="col">协议</th><th scope="col">状态</th><th scope="col" class="actions-heading">操作</th></tr></thead><tbody id="mapping-rows"></tbody></table></div>
+              <p class="mapping-footnote"><svg class="icon"><use href="#i-info"/></svg><span>公网流量由入口机器承担。两机之间走私网，两个方向分别管理。</span></p>
+            </div>
+
+            <aside id="mapping-editor" class="editor" aria-labelledby="editor-title" hidden>
+              <div class="editor-header"><div><span id="editor-mode" class="editor-kicker">创建规则</span><h2 id="editor-title">新建映射</h2></div><button id="editor-close" class="icon-button" title="关闭编辑" aria-label="关闭编辑"><svg class="icon"><use href="#i-close"/></svg></button></div>
+              <form id="mapping-form">
+                <div class="field"><label for="mapping-name">名称</label><input id="mapping-name" name="name" maxlength="80" placeholder="例如：网站备用入口" required></div>
+                <div class="field"><label for="mapping-source">入口机器</label><select id="mapping-source" name="source_node" required></select><p id="source-address" class="field-hint mono"></p></div>
+                <div class="field"><label for="mapping-listen-port">公网端口</label><input id="mapping-listen-port" name="listen_port" placeholder="8080 或 8080-8090" maxlength="11" required aria-describedby="port-help"><p id="port-help" class="field-hint">单个端口或连续范围，最多 1000 个。</p></div>
+                <div class="field"><label for="mapping-target">目标机器</label><select id="mapping-target" name="target_node" required></select><p id="target-address" class="field-hint mono"></p><p class="field-hint">目标服务需监听私网 IP 或 0.0.0.0，只监听 127.0.0.1 无法映射。</p></div>
+                <div class="field-pair"><div class="field"><label for="mapping-target-port">目标端口</label><input id="mapping-target-port" name="target_port" placeholder="80" maxlength="11" required></div><div class="field"><label for="mapping-protocol">协议</label><select id="mapping-protocol" name="protocol"><option value="tcp">TCP</option><option value="udp">UDP</option><option value="both">TCP + UDP</option></select></div></div>
+                <div id="route-preview" class="route-preview" aria-label="映射路径预览"></div>
+                <label class="enable-choice"><input id="mapping-enabled" name="enabled" type="checkbox" checked><span><strong>立即启用</strong><small>保存后将规则下发到入口机器。</small></span></label>
+                <div id="port-notice" class="notice compact" hidden><svg class="icon"><use href="#i-shield"/></svg><p></p></div>
+                <p id="form-error" class="form-error" role="alert" hidden></p>
+                <div class="editor-actions"><button id="mapping-save" type="submit" class="button primary" data-mutate>保存并应用</button><button id="mapping-cancel" type="button" class="button secondary">取消</button></div>
+                <div id="editor-existing-actions" class="editor-existing-actions" hidden><button id="mapping-reverse" type="button" class="text-button"><svg class="icon"><use href="#i-network"/></svg>反向新建</button><button id="mapping-delete" type="button" class="text-button danger-text" data-mutate><svg class="icon"><use href="#i-trash"/></svg>删除映射</button></div>
+              </form>
+            </aside>
+          </div>
+        </section>
+
+        <section id="view-nodes" aria-label="机器状态" hidden><div class="section-heading"><div><h2>已接入机器 <span id="node-total" class="count-badge">—</span></h2><p>代理状态、监听端口与网卡计数。</p></div></div><div id="node-list" class="node-list"></div></section>
+        <section id="view-events" aria-label="操作记录" hidden><div class="section-heading"><div><h2>最近操作 <span id="event-total" class="count-badge">—</span></h2><p>记录映射变更与规则同步结果。</p></div></div><div class="filters"><label class="search-field"><svg class="icon"><use href="#i-search"/></svg><span class="sr-only">搜索操作记录</span><input id="event-search" type="search" placeholder="搜索操作或详情" autocomplete="off"></label><label><span class="sr-only">操作结果</span><select id="event-filter"><option value="">全部结果</option><option value="success">成功</option><option value="failure">失败</option></select></label></div><div id="event-empty" class="empty-state" hidden><span class="empty-icon"><svg class="icon"><use href="#i-history"/></svg></span><h3>暂无操作记录</h3><p>保存映射或同步规则后，结果会显示在这里。</p></div><div id="event-table-wrap" class="table-wrap"><table class="event-table"><caption class="sr-only">最近的操作记录</caption><thead><tr><th scope="col">时间</th><th scope="col">操作</th><th scope="col">详情</th><th scope="col">结果</th></tr></thead><tbody id="event-rows"></tbody></table></div></section>
+      </main>
+      <footer class="workspace-footer"><span>NetShare · 自有机器，私网相连。</span><span id="config-revision"></span></footer>
+    </div>
+  </div>
+
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><div class="dialog-content"><span id="confirm-icon" class="dialog-icon"><svg class="icon"><use href="#i-alert"/></svg></span><h2 id="confirm-title"></h2><p id="confirm-description"></p><div class="dialog-actions"><button id="confirm-cancel" class="button secondary" autofocus>取消</button><button id="confirm-ok" class="button danger">确认</button></div></div></dialog>
+  <dialog id="password-dialog" class="confirm-dialog password-dialog" aria-labelledby="password-title"><form id="password-form" class="dialog-content"><h2 id="password-title">修改登录密码</h2><p class="password-intro">修改后，其他已登录的设备需要重新登录。</p><div class="field"><label for="password-current">当前密码</label><input id="password-current" type="password" autocomplete="current-password" required maxlength="256"></div><div class="field"><label for="password-new">新密码</label><input id="password-new" type="password" autocomplete="new-password" required minlength="12" maxlength="72" aria-describedby="password-help"><p id="password-help" class="field-hint">至少 12 个字符，最多 72 字节。</p></div><div class="field"><label for="password-repeat">再次输入新密码</label><input id="password-repeat" type="password" autocomplete="new-password" required minlength="12" maxlength="72"></div><p id="password-error" class="form-error" role="alert" hidden></p><div class="dialog-actions"><button id="password-cancel" type="button" class="button secondary">取消</button><button id="password-save" type="submit" class="button primary">保存新密码</button></div></form></dialog>
+  <div id="toasts" class="toasts" aria-live="polite" aria-relevant="additions"></div>
+</body>
+</html>

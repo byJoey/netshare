@@ -1,0 +1,30 @@
+name: 构建与测试
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: 静态检查
+        run: go vet ./...
+      - name: 竞态与单元测试
+        run: go test -race ./...
+      - name: 构建 Linux 发行包
+        run: bash ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netshare-linux
+          path: dist/
+          retention-days: 14

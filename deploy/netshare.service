@@ -1,0 +1,33 @@
+[Unit]
+Description=NetShare 映射管理台
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=netshare
+Group=netshare
+ExecStart=/usr/local/bin/netshare serve --config /etc/netshare/controller.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+UMask=0077
+StateDirectory=netshare
+StateDirectoryMode=0700
+NoNewPrivileges=true
+CapabilityBoundingSet=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/netshare /etc/netshare
+
+[Install]
+WantedBy=multi-user.target
