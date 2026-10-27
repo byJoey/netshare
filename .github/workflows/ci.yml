@@ -17,10 +17,23 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 编译嵌入式前端
+        run: |
+          npm --prefix frontend ci --no-audit --no-fund
+          npm --prefix frontend run build
       - name: 静态检查
         run: go vet ./...
       - name: 竞态与单元测试
         run: go test -race ./...
+      - name: 安装管理脚本验证
+        run: |
+          bash -n manage.sh
+          python3 scripts/manage_test.py
       - name: 构建 Linux 发行包
         run: bash ./build.sh
       - uses: actions/upload-artifact@v4

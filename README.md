@@ -154,12 +154,13 @@ systemctl enable --now netshare-agent
 在全新主机上安装 Caddy 后，可以把修改后的模板安装为 `/etc/caddy/Caddyfile`；已有站点则将这一个站点块并入现有配置，先备份原文件。
 
 ```bash
-install -d -o caddy -g caddy -m 0750 /var/log/caddy
 caddy validate --config /etc/caddy/Caddyfile
 systemctl reload caddy
 ```
 
-通过 `https://你的管理台域名` 登录。公网不需要开放 `18440`；控制台 HTTP 只监听回环。私网代理 `31880` 不向公网监听，且没有有效的控制台客户端证书就无法调用。
+执行 `sudo netshare-manage entry` 查看完整随机入口，再通过该地址登录；手动部署时可用 `sudo /usr/local/bin/netshare access-path show --config /etc/netshare/controller.json` 查看。裸域名返回 404 属于正常行为。公网不需要开放 `18440`；控制台 HTTP 只监听回环。私网代理 `31880` 不向公网监听，且没有有效的控制台客户端证书就无法调用。
+
+默认 Caddy 模板不启用访问日志，避免完整随机入口被写入请求记录。需要额外访问日志时，先配置路径脱敏。
 
 ## 创建第一条映射
 

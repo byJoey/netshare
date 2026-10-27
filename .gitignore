@@ -9,3 +9,6 @@ secrets/
 
 __pycache__/
 *.pyc
+
+# README 引导用户填写的真实机器清单，不进入公开仓库。
+/nodes.json

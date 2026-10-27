@@ -2,11 +2,5 @@
 netshare.example.com {
     encode zstd gzip
     reverse_proxy 127.0.0.1:18440
-    log {
-        output file /var/log/caddy/netshare-access.log {
-            roll_size 10MiB
-            roll_keep 5
-        }
-        format json
-    }
+    # 默认不记录访问路径，避免随机管理入口进入日志。
 }
