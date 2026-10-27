@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -347,11 +348,40 @@ func TestProductionRoutesWithEmbeddedAssets(t *testing.T) {
 		t.Fatal(e)
 	}
 	h := c.Handler(assets)
-	for _, path := range []string{"/", "/assets/app.js", "/assets/style.css", "/healthz", "/api/session"} {
+	for _, path := range []string{"/", "/healthz", "/api/session"} {
 		w := request(t, h, "GET", path, "", nil, "", "")
 		if w.Code != 200 {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
 		}
+	}
+	page := request(t, h, "GET", "/", "", nil, "", "")
+	// 读取真实入口引用，覆盖哈希资源及嵌套目录，避免只验证旧文件名。
+	refs := regexp.MustCompile(`(?:src|href)="(/assets/[^"#]+)"`).FindAllStringSubmatch(page.Body.String(), -1)
+	var hasScript, hasStyle bool
+	for _, ref := range refs {
+		path := ref[1]
+		w := request(t, h, "GET", path, "", nil, "", "")
+		if w.Code != 200 || w.Body.Len() == 0 {
+			t.Fatalf("入口引用的静态资源不可用 %s: %d", path, w.Code)
+		}
+		if strings.HasSuffix(path, ".js") {
+			hasScript = true
+			if !strings.Contains(w.Header().Get("Content-Type"), "javascript") {
+				t.Fatalf("脚本类型错误 %s: %s", path, w.Header().Get("Content-Type"))
+			}
+		}
+		if strings.HasSuffix(path, ".css") {
+			hasStyle = true
+			if !strings.Contains(w.Header().Get("Content-Type"), "text/css") {
+				t.Fatalf("样式类型错误 %s: %s", path, w.Header().Get("Content-Type"))
+			}
+		}
+	}
+	if !hasScript || !hasStyle {
+		t.Fatal("入口缺少可用的脚本或样式")
+	}
+	if !strings.Contains(page.Header().Get("Content-Security-Policy"), "script-src 'self';") {
+		t.Fatal("静态界面必须拒绝内联脚本与外部脚本")
 	}
 	for _, path := range []string{"/.env", "/controller.json", "/api/unknown"} {
 		w := request(t, h, "GET", path, "", nil, "", "")

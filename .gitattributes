@@ -1,0 +1,2 @@
+# 构建产物保留依赖许可注释的原始空行，不手改已校验的哈希资源。
+/internal/webui/assets/static/* linguist-generated=true whitespace=-blank-at-eol

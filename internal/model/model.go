@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-var Version = "1.0.0"
+var Version = "1.1.0"
 
 type Node struct {
 	ID               string `json:"id"`
