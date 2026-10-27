@@ -1,6 +1,8 @@
 package model
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"regexp"
@@ -9,7 +11,26 @@ import (
 	"time"
 )
 
-var Version = "1.1.0"
+var Version = "1.2.0"
+
+var accessPathPattern = regexp.MustCompile(`^/[A-Za-z0-9][A-Za-z0-9_-]{15,95}$`)
+
+// ValidateAccessPath 只允许单段入口；空值用于兼容旧部署。
+func ValidateAccessPath(value string) error {
+	if value != "" && !accessPathPattern.MatchString(value) {
+		return fmt.Errorf("管理路径必须是以 / 开头、长度 16–96 的单段字母数字路径，可包含 - 和 _")
+	}
+	return nil
+}
+
+// NewAccessPath 使用 128 位系统随机数生成独立管理入口。
+func NewAccessPath() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("生成随机管理路径失败：%w", err)
+	}
+	return "/ns-" + hex.EncodeToString(value[:]), nil
+}
 
 type Node struct {
 	ID               string `json:"id"`

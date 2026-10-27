@@ -105,10 +105,10 @@ func (a *authState) get(r *http.Request) (string, session, bool) {
 	return cookie.Value, s, true
 }
 func (c *Controller) setCookie(w http.ResponseWriter, id string) {
-	http.SetCookie(w, &http.Cookie{Name: "netshare_session", Value: id, Path: "/", HttpOnly: true, Secure: c.cfg.CookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: 43200})
+	http.SetCookie(w, &http.Cookie{Name: "netshare_session", Value: id, Path: c.cfg.AccessPath + "/", HttpOnly: true, Secure: c.cfg.CookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: 43200})
 }
 func (c *Controller) clearCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: "netshare_session", Value: "", Path: "/", HttpOnly: true, Secure: c.cfg.CookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "netshare_session", Value: "", Path: c.cfg.AccessPath + "/", HttpOnly: true, Secure: c.cfg.CookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 }
 func clientIP(r *http.Request) string {
 	host, _, e := net.SplitHostPort(r.RemoteAddr)

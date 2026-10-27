@@ -1,5 +1,17 @@
 import type { Session } from "./types";
 
+// 入口由服务端注入；不从浏览器地址或持久存储猜测管理路径。
+const configuredBasePath =
+  document.querySelector<HTMLMetaElement>('meta[name="netshare-base-path"]')
+    ?.content || "";
+if (
+  configuredBasePath &&
+  !/^\/[A-Za-z0-9][A-Za-z0-9_-]{15,95}$/.test(configuredBasePath)
+) {
+  throw new Error("管理入口配置无效，请联系管理员。");
+}
+const basePath = configuredBasePath;
+
 let session: Session | null = null;
 export function setApiSession(value: Session | null) {
   session = value;
@@ -27,7 +39,7 @@ export async function api<T>(
   if (method !== "GET" && session?.csrf_token)
     headers["X-CSRF-Token"] = session.csrf_token;
   try {
-    const response = await fetch(path, {
+    const response = await fetch(basePath + path, {
       method,
       headers,
       credentials: "same-origin",

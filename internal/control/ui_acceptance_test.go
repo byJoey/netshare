@@ -50,6 +50,12 @@ func TestUIAcceptanceServer(t *testing.T) {
 	c.cfg.Listen = "127.0.0.1:19111"
 	c.cfg.ExternalURL = "http://127.0.0.1:19111"
 	c.cfg.CookieSecure = false
+	if os.Getenv("NETSHARE_UI_ACCEPTANCE_RANDOM_PATH") == "1" {
+		c.cfg.AccessPath, err = model.NewAccessPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	password := randomID() + randomID()[:16]
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
 	if err != nil {
@@ -78,6 +84,11 @@ func TestUIAcceptanceServer(t *testing.T) {
 	if err = os.Chmod(passwordFile, 0600); err != nil {
 		t.Fatal(err)
 	}
+	entryFile := filepath.Join(filepath.Dir(passwordFile), "netshare-qa-entry.txt")
+	if err = os.WriteFile(entryFile, []byte(c.cfg.ExternalURL+c.cfg.AccessPath+"/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(entryFile)
 	assets, err := fs.Sub(webui.FS, "assets")
 	if err != nil {
 		t.Fatal(err)

@@ -6,3 +6,6 @@
 .DS_Store
 config.local.json
 secrets/
+
+__pycache__/
+*.pyc

@@ -46,6 +46,7 @@ type options struct {
 type controllerConfig struct {
 	Listen       string       `json:"listen"`
 	ExternalURL  string       `json:"external_url"`
+	AccessPath   string       `json:"access_path"`
 	Username     string       `json:"username"`
 	PasswordHash string       `json:"password_hash"`
 	StateFile    string       `json:"state_file"`
@@ -162,7 +163,11 @@ func initialize(opt options) error {
 		"controller/controller-key.pem": client.keyPEM,
 		"controller/admin-password.txt": []byte(password + "\n"),
 	}
-	controller := controllerConfig{Listen: opt.listen, ExternalURL: "https://" + domain, Username: "admin", PasswordHash: string(hash), StateFile: "/var/lib/netshare/state.json", CAFile: "/etc/netshare/ca.pem", CertFile: "/etc/netshare/controller.pem", KeyFile: "/etc/netshare/controller-key.pem", CookieSecure: true, Nodes: nodes}
+	accessPath, err := model.NewAccessPath()
+	if err != nil {
+		return err
+	}
+	controller := controllerConfig{Listen: opt.listen, ExternalURL: "https://" + domain, AccessPath: accessPath, Username: "admin", PasswordHash: string(hash), StateFile: "/var/lib/netshare/state.json", CAFile: "/etc/netshare/ca.pem", CertFile: "/etc/netshare/controller.pem", KeyFile: "/etc/netshare/controller-key.pem", CookieSecure: true, Nodes: nodes}
 	files["controller/controller.json"], err = marshal(controller)
 	if err != nil {
 		return err

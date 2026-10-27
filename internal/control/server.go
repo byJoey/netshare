@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -69,7 +70,17 @@ func (c *Controller) Handler(assets fs.FS) http.Handler {
 	}, true))
 	m.HandleFunc("GET /api/", func(w http.ResponseWriter, r *http.Request) { apiError(w, 404, "接口不存在") })
 	if assets != nil {
-		m.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServer(http.FS(assets))))
+		files := http.StripPrefix("/assets/", http.FileServer(http.FS(assets)))
+		m.HandleFunc("GET /assets", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+		m.HandleFunc("GET /assets/", func(w http.ResponseWriter, r *http.Request) {
+			name := strings.TrimPrefix(r.URL.Path, "/assets/")
+			info, err := fs.Stat(assets, name)
+			if err != nil || !info.Mode().IsRegular() || name == "index.html" {
+				http.NotFound(w, r)
+				return
+			}
+			files.ServeHTTP(w, r)
+		})
 		m.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/" {
 				http.NotFound(w, r)
@@ -81,7 +92,7 @@ func (c *Controller) Handler(assets fs.FS) http.Handler {
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write(b)
+			_, _ = w.Write(renderIndex(b, c.cfg.AccessPath))
 		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -98,8 +109,41 @@ func (c *Controller) Handler(assets fs.FS) http.Handler {
 				apiError(w, 500, "服务处理失败，请稍后重试")
 			}
 		}()
+		prefix := c.cfg.AccessPath
+		if prefix != "" {
+			// 在 ServeMux 清理路径之前拒绝编码或穿越，避免重定向和前缀混淆。
+			cleanPath := path.Clean(r.URL.Path)
+			if r.URL.EscapedPath() != r.URL.Path || cleanPath != r.URL.Path && cleanPath+"/" != r.URL.Path || strings.Contains(r.URL.Path, "\\") {
+				http.NotFound(w, r)
+				return
+			}
+			if r.URL.Path == prefix && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+				http.Redirect(w, r, prefix+"/", http.StatusPermanentRedirect)
+				return
+			}
+			if !strings.HasPrefix(r.URL.Path, prefix+"/") {
+				http.NotFound(w, r)
+				return
+			}
+			r = r.Clone(r.Context())
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
+			r.URL.RawPath = ""
+		}
 		m.ServeHTTP(w, r)
 	})
+}
+
+func renderIndex(source []byte, prefix string) []byte {
+	page := string(source)
+	// 资源来自随二进制构建的可信 HTML，前缀已在配置加载时严格验证。
+	page = strings.ReplaceAll(page, `src="./static/`, `src="`+prefix+`/assets/static/`)
+	page = strings.ReplaceAll(page, `href="./static/`, `href="`+prefix+`/assets/static/`)
+	page = strings.ReplaceAll(page, `href="./favicon.svg"`, `href="`+prefix+`/assets/favicon.svg"`)
+	// 同时兼容升级前的构建产物，避免前端与后端构建顺序影响可用性。
+	page = strings.ReplaceAll(page, `src="/assets/`, `src="`+prefix+`/assets/`)
+	page = strings.ReplaceAll(page, `href="/assets/`, `href="`+prefix+`/assets/`)
+	page = strings.Replace(page, "</head>", `<meta name="netshare-base-path" content="`+prefix+`"></head>`, 1)
+	return []byte(page)
 }
 
 func (c *Controller) handleSession(w http.ResponseWriter, r *http.Request) {

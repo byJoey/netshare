@@ -21,6 +21,7 @@ import (
 type Config struct {
 	Listen       string       `json:"listen"`
 	ExternalURL  string       `json:"external_url"`
+	AccessPath   string       `json:"access_path,omitempty"`
 	Username     string       `json:"username"`
 	PasswordHash string       `json:"password_hash"`
 	StateFile    string       `json:"state_file"`
@@ -60,8 +61,11 @@ func LoadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("管理员密码摘要无效")
 	}
 	u, err := url.Parse(cfg.ExternalURL)
-	if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" && u.Path != "/" {
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || (u.Scheme != "https" && u.Scheme != "http") || u.Path != "" && u.Path != "/" {
 		return cfg, fmt.Errorf("external_url 必须是完整的 HTTP(S) 站点地址")
+	}
+	if err = model.ValidateAccessPath(cfg.AccessPath); err != nil {
+		return cfg, err
 	}
 	if cfg.CookieSecure && u.Scheme != "https" {
 		return cfg, fmt.Errorf("线上安全会话必须使用 HTTPS external_url")

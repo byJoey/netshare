@@ -8,6 +8,12 @@
 
 Go 编译为一个二进制，包含控制台、节点代理和前端资源。浏览器不依赖外部脚本或字体。
 
+## 安装与维护脚本
+
+发行包自带 `manage.sh`，安装后可用 `netshare-manage` 菜单或子命令管理。支持安装控制台/节点、升级、启停、日志、备份、卸载和更换随机入口；完整参数与凭据准备见 [安装管理说明](deploy/MANAGER.md)。脚本不修改云平台私网，也不覆盖现有反向代理站点。
+
+新安装默认使用随机管理路径，首页、静态资源和 API 都位于该路径内。原根路径不会跳转到新入口。随机路径用于减少扫描和误访问，登录、会话和 CSRF 校验继续生效。显式执行 `netshare-manage entry` 可查看地址，`netshare-manage path rotate` 更换入口并检查新地址；旧入口会失效。
+
 ## 能管理什么
 
 - TCP、UDP、TCP + UDP，单端口或等长端口范围。
@@ -273,12 +279,12 @@ npm --prefix frontend ci
 npm --prefix frontend run build
 go test -race ./...
 go vet ./...
-VERSION=v1.1.0 bash ./build.sh
+VERSION=v1.2.0 bash ./build.sh
 ```
 
 `build.sh` 会按锁文件安装并重建前端，将全部静态资源编译进 Go 程序；先编译前端再运行 Go 测试，才能验证本次的真实资源。前端源文件变更后不要只运行 `go build`，否则会带上旧的静态页面。
 
-本地界面开发可运行 `npm --prefix frontend run dev`。开发服务器只绑定回环地址，API 接口需连接自己的本地控制器，不要把生产凭据放入 Vite 环境变量。页面使用哈希路由，`/#mappings`、`/#nodes`、`/#events` 可直接访问。主题跟随系统，也可切换浅色或深色；浏览器只保存主题、侧栏和自动刷新偏好，登录使用 HttpOnly 会话。
+本地界面开发可运行 `npm --prefix frontend run dev`。开发服务器只绑定回环地址，API 接口需连接自己的本地控制器，不要把生产凭据放入 Vite 环境变量。页面在管理入口后使用哈希路由；在入口地址后加 `#mappings`、`#nodes`、`#events` 可直接访问对应页面。主题跟随系统，也可切换浅色或深色；浏览器只保存主题、侧栏和自动刷新偏好，登录使用 HttpOnly 会话。
 
 需要在无真实节点的环境中验收界面时，可显式启动隔离控制器：
 
@@ -290,7 +296,7 @@ go test ./internal/control -run '^TestUIAcceptanceServer$' -count=1 -v -timeout=
 
 它只监听 `127.0.0.1:19111`，使用真实控制器 API、会话和临时状态，代理规则保存在内存中。账号为 `admin`，随机密码只写入指定的 0600 文件。结束时发送中断信号，程序会关闭服务并删除密码文件；强制杀进程后需自行删除该文件。此模式验证界面交互，不代表真实网络路径已验通。
 
-`dist/` 包含 Linux amd64、arm64 的压缩包和校验和。每个包带有对应架构的 `netshare` 二进制、部署模板、本说明和第三方许可 `licenses/`。CI 只构建和测试，不自动发布 Release 或修改线上配置。
+`dist/` 包含 Linux amd64、arm64 的压缩包和校验和。每个包带有对应架构的 `netshare` 二进制、`manage.sh` 管理脚本、部署模板、本说明和第三方许可 `licenses/`。CI 只构建和测试，不自动发布 Release 或修改线上配置。
 
 ## 来源与使用范围
 

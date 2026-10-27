@@ -164,6 +164,9 @@ func TestInitializePrivateBundle(t *testing.T) {
 	if config.ExternalURL != "https://netshare.example.com" || !config.CookieSecure || config.Username != "admin" {
 		t.Fatal("生产控制台配置错误")
 	}
+	if !strings.HasPrefix(config.AccessPath, "/ns-") || len(config.AccessPath) != 36 || model.ValidateAccessPath(config.AccessPath) != nil {
+		t.Fatal("首次安装必须生成安全的随机管理路径")
+	}
 	if bytes.Contains(data, []byte(password)) {
 		t.Fatal("控制台配置中出现密码明文")
 	}
