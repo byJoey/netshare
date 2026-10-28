@@ -16,6 +16,18 @@ LOCK_DIR=""
 ROLE=""
 SOURCE=""
 BUNDLE=""
+PAIRING=""
+HOST=""
+PORT=""
+LISTEN=""
+AUTO_HOST=false
+NODE_ID=""
+NODE_NAME=""
+PUBLIC_IP=""
+PRIVATE_IP=""
+PUBLIC_INTERFACE=""
+PRIVATE_INTERFACE=""
+AUTO_BOOTSTRAP=false
 EXPECTED_SHA=""
 PURGE=false
 NO_START=false
@@ -29,11 +41,14 @@ usage() {
   cat <<'EOF'
 NetShare 安装与管理
 
+  bash manage.sh install controller [--port 18440] [--host 访问IPv4] [--source 发行目录或.tar.gz]
   bash manage.sh install controller --bundle /私密目录/controller [--source 发行目录或.tar.gz] [--no-start]
+  bash manage.sh install agent --pairing /节点配对包.tar.gz [--source 发行目录或.tar.gz]
   bash manage.sh install agent --bundle /私密目录/agents/节点ID [--source 发行目录或.tar.gz] [--no-start]
   netshare-manage upgrade controller|agent [--source 发行目录或.tar.gz]
   netshare-manage start|stop|restart|status|logs controller|agent
   netshare-manage entry
+  netshare-manage node add --id ID --name 名称 --public-ip IP --private-ip IP --public-interface 网卡 --private-interface 网卡
   netshare-manage path rotate
   netshare-manage backup controller|agent
   netshare-manage uninstall controller|agent [--purge]
@@ -42,14 +57,19 @@ NetShare 安装与管理
 --source 也支持显式 HTTPS 地址，此时必须加 --sha256 64位校验和。
 本地压缩包若提供 --sha256 也会校验；离线使用本目录时填 --source .。
 已有配置、证书和映射不会被安装/升级覆盖。卸载默认保留配置与状态；
---purge 才删除该角色的数据，备份始终保留。脚本不安装/修改 Caddy 或云私网。
+--purge 才删除该角色的数据，备份始终保留。首次控制台安装默认直接通过 HTTP IP:端口访问；
+已有控制台保留原监听和 HTTPS 配置。脚本不改已有 Web 站点、网卡、云私网或全局防火墙。
 不带参数时打开中文菜单；输入 help 查看本说明。
 EOF
 }
 
 cleanup() {
+  local result=$?
+  trap - ERR
+  if [[ "$result" -ne 0 && "$TX_STARTED" == true ]];then rollback || say "退出后的自动回退未完整完成，请按备份恢复。" >&2;fi
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then rm -rf -- "$TMP_DIR"; fi
   if [[ -n "$LOCK_DIR" && -d "$LOCK_DIR" ]]; then rmdir -- "$LOCK_DIR" 2>/dev/null || true; fi
+  return "$result"
 }
 trap cleanup EXIT
 
@@ -65,6 +85,23 @@ setup_environment() {
     [[ "$(uname -s)" == Linux ]] || die "此脚本面向 Linux systemd 主机"
     [[ "${EUID:-$(id -u)}" == 0 ]] || die "请以 root 运行"
     [[ -d /run/systemd/system ]] || die "当前主机未运行 systemd"
+  fi
+  if ! $TEST_MODE; then
+    local -a missing_packages=()
+    command -v python3 >/dev/null 2>&1 || missing_packages+=(python3)
+    command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
+    [[ -s /etc/ssl/certs/ca-certificates.crt ]] || missing_packages+=(ca-certificates)
+    command -v ip >/dev/null 2>&1 || missing_packages+=(iproute2)
+    if [[ "$ROLE" == agent ]]; then
+      command -v nft >/dev/null 2>&1 || missing_packages+=(nftables)
+      if ! command -v ip >/dev/null 2>&1 || ! command -v ss >/dev/null 2>&1;then missing_packages+=(iproute2);fi
+    fi
+    if [[ ${#missing_packages[@]} -gt 0 ]];then
+      command -v apt-get >/dev/null 2>&1 || die "缺少安装依赖且当前系统没有 apt-get，请先安装 python3/curl；节点还需 nftables/iproute2"
+      say "正在安装缺少的系统依赖：${missing_packages[*]}"
+      apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing_packages[@]}"
+    fi
   fi
   for tool in python3 systemctl install tar cp mv chmod mkdir rm date mktemp; do command -v "$tool" >/dev/null 2>&1 || die "缺少依赖：$tool"; done
   if $TEST_MODE; then
@@ -236,6 +273,7 @@ snapshot_begin() {
 import json,os,pathlib,shutil,sys
 root,dest,cfg,state,unit=sys.argv[1:];target=pathlib.Path(dest);items=['/usr/local/bin/netshare','/usr/local/sbin/netshare-manage',cfg,state,'/etc/systemd/system/'+unit+'.service']
 if unit=='netshare-agent':items+=['/etc/sysctl.d/90-netshare-agent.conf']
+else:items+=['/var/lib/netshare-bootstrap']
 records=[]
 for index,item in enumerate(items):
     p=pathlib.Path(root+item)
@@ -400,6 +438,121 @@ expected={'state_file':'/var/lib/netshare/state.json','ca_file':'/etc/netshare/c
 if any(c.get(k)!=v for k,v in expected.items()):raise SystemExit('凭据配置路径与标准安装位置不符；请先按说明准备bundle')
 PY
 }
+# 首次安装自行生成凭据；CA 资料只交给 root 管理，控制台服务仅得到叶子凭据。
+detect_access_host() {
+  HOST="$(python3 - <<'PYCODE'
+import ipaddress,json,subprocess
+addresses=[];default_devices=[]
+try:
+    routes=json.loads(subprocess.check_output(['ip','-j','route','show','default'],stderr=subprocess.DEVNULL,timeout=5))
+    default_devices=[route.get('dev') for route in routes if route.get('dev')]
+    for interface in json.loads(subprocess.check_output(['ip','-j','address','show'],stderr=subprocess.DEVNULL,timeout=5)):
+        for address in interface.get('addr_info',[]):
+            if address.get('family')!='inet':continue
+            value=ipaddress.ip_address(address.get('local',''))
+            if not value.is_loopback and not value.is_link_local and not value.is_unspecified and not value.is_multicast:
+                addresses.append((value.is_global,interface['ifname'] in default_devices,str(value)))
+except (OSError,ValueError,subprocess.SubprocessError):pass
+if addresses:print(max(addresses)[2])
+PYCODE
+)"
+  [[ -n "$HOST" ]] || die "未找到可用 IPv4，请用 --host 访问IP 指定本机地址"
+  AUTO_HOST=true
+}
+
+initialize_controller() {
+  if [[ -z "$PORT" ]];then
+    if [[ -t 0 ]];then read -r -p '控制台端口 [18440]：' PORT || die "已取消";fi
+    PORT="${PORT:-18440}"
+  fi
+  [[ "$PORT" =~ ^[1-9][0-9]{0,4}$ && "$PORT" -le 65535 && "$PORT" != 22 ]] || die "控制台端口必须为 1–65535 且不能使用 SSH 22"
+  [[ -n "$HOST" ]] || detect_access_host
+  HOST="$(python3 - "$HOST" <<'PYCODE'
+import ipaddress,sys
+try:value=ipaddress.ip_address(sys.argv[1])
+except ValueError:raise SystemExit('访问地址需要 IPv4，不要带协议、端口或路径')
+if value.version!=4 or value.is_unspecified or value.is_multicast or str(value)!=sys.argv[1]:raise SystemExit('访问地址需要规范 IPv4，不能使用 0.0.0.0 或组播地址')
+print(value)
+PYCODE
+)"
+  LISTEN="${LISTEN:-0.0.0.0:$PORT}"
+  say "正在生成管理员密码、随机入口和节点配对所需凭据…"
+  "$TMP_DIR/package-binary" init --standalone --external-url "http://$HOST:$PORT" --listen "$LISTEN" --dir "$TMP_DIR/bootstrap" >/dev/null
+  BUNDLE="$TMP_DIR/bootstrap/controller"
+  AUTO_BOOTSTRAP=true
+  validate_bundle
+  if ! $TEST_MODE;then
+    python3 - "$BUNDLE/controller.json" <<'PYCODE'
+import json,socket,sys
+cfg=json.load(open(sys.argv[1]));host,port=cfg['listen'].rsplit(':',1)
+try:
+    with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as sock:sock.bind((host,int(port)))
+except OSError:raise SystemExit('控制台监听端口已被占用或地址不在本机，请换端口后重试；不会停止其他服务')
+PYCODE
+  fi
+}
+
+install_bootstrap() {
+  local target
+  target="$(path_for /var/lib/netshare-bootstrap)"
+  assert_no_symlink "$target"
+  [[ ! -e "$target" ]] || die "已有初始化资料但控制台配置缺失；请先恢复配置，不自动替换原有 CA"
+  ensure_private_dir "$target"
+  python3 - "$TMP_DIR/bootstrap" "$target" <<'PYCODE'
+import os,pathlib,shutil,sys
+source,target=map(pathlib.Path,sys.argv[1:])
+for item in source.rglob('*'):
+    if item.is_symlink() or not (item.is_file() or item.is_dir()):raise SystemExit('初始化资料包含不受支持的文件')
+shutil.copytree(source,target,dirs_exist_ok=True)
+for item in [target,*target.rglob('*')]:os.chmod(item,0o700 if item.is_dir() else 0o600)
+PYCODE
+}
+
+prepare_pairing() {
+  [[ -n "$PAIRING" && -f "$PAIRING" && ! -L "$PAIRING" ]] || die "节点首次安装需要控制台生成的配对包；请用 --pairing /路径/节点配对包.tar.gz"
+  python3 - "$PAIRING" "$TMP_DIR/pairing" <<'PYCODE'
+import pathlib,sys,tarfile
+archive,dest=map(pathlib.Path,sys.argv[1:]);names={'agent.json','ca.pem','server.pem','server-key.pem'}
+if archive.stat().st_size>4*1024*1024:raise SystemExit('节点配对包超过4MiB')
+with tarfile.open(archive,'r:gz') as tf:
+    members=tf.getmembers()
+    if len(members)>8 or sum(x.size for x in members)>4*1024*1024:raise SystemExit('节点配对包内容异常')
+    roots=set();files=set()
+    for member in members:
+        path=pathlib.PurePosixPath(member.name)
+        if path.is_absolute() or '..' in path.parts or not path.parts or not(member.isfile() or member.isdir()):raise SystemExit('节点配对包包含不安全路径或文件类型')
+        roots.add(path.parts[0])
+        if member.isdir():
+            if len(path.parts)!=1:raise SystemExit('节点配对包目录层级无效')
+        else:
+            if len(path.parts)!=2 or path.parts[1] not in names or path.parts[1] in files:raise SystemExit('节点配对包必须只含本节点的4个叶子文件')
+            files.add(path.parts[1])
+    if len(roots)!=1 or files!=names:raise SystemExit('节点配对包不完整')
+    dest.mkdir(mode=0o700);tf.extractall(dest,members=members)
+    (dest/'bundle-root.txt').write_text(str(dest/roots.pop()))
+PYCODE
+  BUNDLE="$(cat "$TMP_DIR/pairing/bundle-root.txt")"
+  validate_bundle
+}
+
+show_controller_delivery() {
+  say '管理入口：'
+  "$(path_for /usr/local/bin/netshare)" access-path show --config "$(config_for controller)"
+  if $AUTO_BOOTSTRAP; then
+    if $AUTO_HOST;then
+      say '访问 IP 来自本机网卡探测。NAT 主机首次安装请用 --host 公网IP；已安装则按文档修改 external_url 后重启，仅替换浏览器地址无法登录。'
+    fi
+    say '管理员账号：admin'
+    say "首次密码已保存：$(path_for /var/lib/netshare-bootstrap/controller/admin-password.txt)"
+    if [[ -t 1 ]]; then
+      printf '首次密码：'
+      cat -- "$(path_for /var/lib/netshare-bootstrap/controller/admin-password.txt)"
+    fi
+  else
+    say '登录账号、密码、映射和现有配置已保留。'
+  fi
+}
+
 install_bundle() {
   local cfgdir state files name
   if [[ "$ROLE" == controller ]]; then
@@ -416,9 +569,18 @@ install_bundle() {
 }
 controller_health() {
   python3 - "$(config_for controller)" <<'PY'
-import ipaddress,json,socket,sys,time,urllib.request
-c=json.load(open(sys.argv[1]));host,port=c['listen'].rsplit(':',1);host=host.strip('[]')
-if not ipaddress.ip_address(host).is_loopback:raise SystemExit('拒绝探测非回环控制器')
+import ipaddress,json,socket,subprocess,sys,time,urllib.request
+with open(sys.argv[1]) as config:c=json.load(config)
+host,port=c['listen'].rsplit(':',1);host=host.strip('[]')
+address=ipaddress.ip_address(host)
+if host=='0.0.0.0':host='127.0.0.1'
+elif not address.is_loopback:
+    if address.version!=4:raise SystemExit('拒绝探测非本机控制器')
+    try:
+        interfaces=json.loads(subprocess.check_output(['ip','-j','-4','address','show'],stderr=subprocess.DEVNULL,timeout=5))
+        local=any(item.get('family')=='inet' and item.get('local')==host for interface in interfaces for item in interface.get('addr_info',[]))
+    except (OSError,ValueError,subprocess.SubprocessError):raise SystemExit('无法确认控制器监听地址属于本机，拒绝探测')
+    if not local:raise SystemExit('控制器监听地址不属于本机，拒绝探测远程地址')
 url='http://'+('['+host+']' if ':' in host else host)+':'+port+c.get('access_path','')+'/healthz'
 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));ok=False
 for _ in range(20):
@@ -430,9 +592,51 @@ for _ in range(20):
 if not ok:raise SystemExit('控制器健康检查失败（未输出管理入口）')
 PY
 }
+preflight_agent() {
+  local candidate="$1" cfg="$2" credentials="$3"
+  local -a args
+  if $TEST_MODE && [[ "${NETSHARE_TEST_REAL_BINARY:-}" != 1 ]];then return 0;fi
+  args=(check-agent --config "$cfg" --credential-dir "$credentials")
+  if [[ -f "$(path_for /var/lib/netshare-agent/state.json)" ]];then args+=(--state-file "$(path_for /var/lib/netshare-agent/state.json)");fi
+  if $TEST_MODE;then args+=(--skip-address-check);fi
+  "$candidate" "${args[@]}" >/dev/null
+}
+
+agent_health() {
+  if $TEST_MODE;then systemctl is-active --quiet netshare-agent;return;fi
+  python3 - "$(config_for agent)" <<'PYCODE'
+import json,os,pathlib,socket,subprocess,sys,time
+cfg=json.load(open(sys.argv[1]));host,port=cfg['listen'].rsplit(':',1)
+expected=socket.inet_aton(host)[::-1].hex().upper()+':'+format(int(port),'04X')
+def ready():
+    if subprocess.run(['systemctl','is-active','--quiet','netshare-agent'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:return False
+    pid=subprocess.check_output(['systemctl','show','--property=MainPID','--value','netshare-agent'],text=True).strip()
+    if not pid.isdecimal() or int(pid)<1:return False
+    sockets=set()
+    try:
+        for fd in (pathlib.Path('/proc')/pid/'fd').iterdir():
+            try:
+                value=os.readlink(fd)
+                if value.startswith('socket:['):sockets.add(value[8:-1])
+            except FileNotFoundError:pass
+        with open('/proc/net/tcp') as table:
+            for line in table:
+                parts=line.split()
+                if len(parts)>9 and parts[1]==expected and parts[3]=='0A' and parts[9] in sockets:return True
+    except (OSError,subprocess.SubprocessError):return False
+    return False
+stable=0
+for _ in range(20):
+    stable=stable+1 if ready() else 0
+    if stable>=3:break
+    time.sleep(.5)
+else:raise SystemExit('节点尚未稳定监听配置私网地址，安装已停止；请核对节点安装包、私网 IP 和网卡')
+PYCODE
+}
+
 service_health() {
   systemctl is-active --quiet "$(unit_for "$ROLE")"
-  if [[ "$ROLE" == controller ]]; then controller_health; fi
+  if [[ "$ROLE" == controller ]]; then controller_health;else agent_health;fi
 }
 ensure_random_path() {
   local cfg
@@ -446,26 +650,56 @@ PY
 install_role() {
   role_check "$ROLE"
   prepare_package
-  local cfg service existing=false
+  local cfg service existing=false replace_pairing=false
   cfg="$(config_for "$ROLE")";service="$(unit_for "$ROLE")"
-  if [[ -f "$cfg" ]]; then existing=true; else validate_bundle; fi
-  if [[ "$ROLE" == agent ]]; then for tool in nft ip ss; do command -v "$tool" >/dev/null || die "节点缺少依赖：${tool}（Ubuntu：apt-get install nftables iproute2）"; done; fi
+  if [[ "$ROLE" == agent && -n "$PAIRING" ]];then
+    prepare_pairing
+    replace_pairing=true
+    if [[ -f "$cfg" ]];then
+      existing=true
+      python3 - "$cfg" "$BUNDLE/agent.json" "$(path_for /etc/netshare-agent/ca.pem)" "$BUNDLE/ca.pem" <<'PYCODE'
+import json,pathlib,sys
+before,after,old_ca,new_ca=map(pathlib.Path,sys.argv[1:])
+if json.loads(before.read_text()).get('node',{}).get('id')!=json.loads(after.read_text()).get('node',{}).get('id'):raise SystemExit('节点安装包 ID 与本机已有节点不符，拒绝覆盖')
+if old_ca.read_bytes()!=new_ca.read_bytes():raise SystemExit('节点安装包 CA 与本机已有节点不符，拒绝覆盖')
+PYCODE
+    fi
+  elif [[ -f "$cfg" ]]; then
+    existing=true
+  elif [[ -n "$BUNDLE" ]]; then
+    validate_bundle
+  elif [[ "$ROLE" == controller ]]; then
+    initialize_controller
+  else
+    prepare_pairing
+  fi
+  if [[ "$ROLE" == agent ]]; then
+    for tool in nft ip ss; do command -v "$tool" >/dev/null || die "节点缺少依赖：${tool}（Ubuntu：apt-get install nftables iproute2）"; done
+    if $replace_pairing || ! $existing;then preflight_agent "$TMP_DIR/package-binary" "$BUNDLE/agent.json" "$BUNDLE";else preflight_agent "$TMP_DIR/package-binary" "$cfg" "$(path_for /etc/netshare-agent)";fi
+  fi
   lock_mutation;snapshot_begin "$ROLE"
   atomic_copy "$PACKAGE_DIR/netshare" "$(path_for /usr/local/bin/netshare)" 0755
   atomic_copy "$PACKAGE_DIR/manage.sh" "$(path_for /usr/local/sbin/netshare-manage)" 0755
-  if ! $existing; then install_bundle; fi
+  if ! $existing || $replace_pairing; then
+    if $AUTO_BOOTSTRAP; then install_bootstrap; fi
+    install_bundle
+  fi
   if [[ "$ROLE" == controller ]]; then ensure_random_path; fi
   write_unit "$ROLE"
   systemctl daemon-reload
-  if ! $NO_START; then systemctl enable "$service";systemctl start "$service";service_health; fi
+  if ! $NO_START; then
+    systemctl enable "$service";systemctl start "$service";service_health
+  fi
   TX_STARTED=false
   say "安装完成：${ROLE}。配置和映射已保留；备份：$TX_DIR"
   if $NO_START; then say "服务尚未启动。"; fi
-  if [[ "$ROLE" == controller ]]; then say "使用 netshare-manage entry 查看管理入口。HTTPS 请按 deploy/Caddyfile 配置；脚本不会覆盖已有站点。"; fi
+  if [[ "$ROLE" == controller ]]; then show_controller_delivery; fi
 }
 upgrade_role() {
   role_check "$ROLE";[[ -f "$(config_for "$ROLE")" ]] || die "该角色未安装"
-  prepare_package;lock_mutation;snapshot_begin "$ROLE"
+  prepare_package
+  if [[ "$ROLE" == agent ]];then preflight_agent "$TMP_DIR/package-binary" "$(config_for agent)" "$(path_for /etc/netshare-agent)";fi
+  lock_mutation;snapshot_begin "$ROLE"
   local service
   service="$(unit_for "$ROLE")"
   atomic_copy "$PACKAGE_DIR/netshare" "$(path_for /usr/local/bin/netshare)" 0755
@@ -476,6 +710,95 @@ upgrade_role() {
   say "升级完成：${ROLE}。原启停状态已保留；备份：$TX_DIR"
   say "控制器与节点共用程序文件，另一角色的运行进程保持原样；需要更新其进程时单独重启该角色。"
 }
+prompt_value() {
+  local target="$1" label="$2" default="${3:-}" value
+  [[ -t 0 ]] || die "缺少 $target，请提供节点信息参数"
+  if [[ -n "$default" ]];then read -r -p "$label [$default]：" value || die "已取消";else read -r -p "$label：" value || die "已取消";fi
+  printf -v "$target" '%s' "${value:-$default}"
+}
+
+detect_node_defaults() {
+  python3 - "$TMP_DIR/node-defaults" <<'PYCODE'
+import ipaddress,json,pathlib,subprocess,sys
+public_ip=private_ip=public_interface=private_interface=''
+try:
+    interfaces=json.loads(subprocess.check_output(['ip','-j','address','show'],stderr=subprocess.DEVNULL,timeout=5))
+    networks=[ipaddress.ip_network(value) for value in ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16')]
+    for interface in interfaces:
+        for address in interface.get('addr_info',[]):
+            if address.get('family')!='inet':continue
+            value=ipaddress.ip_address(address.get('local',''))
+            if any(value in network for network in networks):
+                if not private_ip:private_ip,private_interface=str(value),interface['ifname']
+            elif value.is_global and not public_ip:public_ip,public_interface=str(value),interface['ifname']
+except (OSError,ValueError,subprocess.SubprocessError):pass
+pathlib.Path(sys.argv[1]).write_text('\n'.join((public_ip,private_ip,public_interface,private_interface))+'\n')
+PYCODE
+  { read -r DEFAULT_PUBLIC_IP;read -r DEFAULT_PRIVATE_IP;read -r DEFAULT_PUBLIC_INTERFACE;read -r DEFAULT_PRIVATE_INTERFACE; } < "$TMP_DIR/node-defaults"
+}
+
+add_node() {
+  ROLE=controller
+  local cfg authority output pairings stamp
+  local DEFAULT_PUBLIC_IP="" DEFAULT_PRIVATE_IP="" DEFAULT_PUBLIC_INTERFACE="" DEFAULT_PRIVATE_INTERFACE=""
+  local -a add_args
+  cfg="$(config_for controller)"
+  authority="$(path_for /var/lib/netshare-bootstrap/authority)"
+  [[ -f "$cfg" && -x "$(path_for /usr/local/bin/netshare)" ]] || die "请先安装控制台"
+  [[ -f "$authority/ca-key.pem" && -f "$authority/ca.pem" ]] || die "本控制台未保留节点签发资料；请恢复 /var/lib/netshare-bootstrap/authority 后重试，不会重新生成 CA"
+  if [[ -t 0 ]];then
+    say '填写要添加的那台机器；私网必须已开通，两张网卡不能相同。'
+    say '自动探测的默认值属于本机；添加另一台机器时请填写那台机器的值。'
+    detect_node_defaults
+  fi
+  [[ -n "$NODE_ID" ]] || prompt_value NODE_ID '节点 ID（例如 node-a）'
+  [[ -n "$NODE_NAME" ]] || prompt_value NODE_NAME '节点名称' "$NODE_ID"
+  [[ -n "$PUBLIC_IP" ]] || prompt_value PUBLIC_IP '该节点公网 IPv4' "$DEFAULT_PUBLIC_IP"
+  [[ -n "$PRIVATE_IP" ]] || prompt_value PRIVATE_IP '该节点私网 IPv4' "$DEFAULT_PRIVATE_IP"
+  [[ -n "$PUBLIC_INTERFACE" ]] || prompt_value PUBLIC_INTERFACE '公网网卡名称（例如 eth0）' "$DEFAULT_PUBLIC_INTERFACE"
+  [[ -n "$PRIVATE_INTERFACE" ]] || prompt_value PRIVATE_INTERFACE '私网网卡名称（例如 eth1）' "$DEFAULT_PRIVATE_INTERFACE"
+  lock_mutation;snapshot_begin controller
+  output="$TMP_DIR/node-output"
+  add_args=(node add --config "$cfg" --authority "$authority" --id "$NODE_ID" --name "$NODE_NAME" --public-ip "$PUBLIC_IP" --private-ip "$PRIVATE_IP" --public-interface "$PUBLIC_INTERFACE" --private-interface "$PRIVATE_INTERFACE" --dir "$output")
+  if $TEST_MODE;then add_args+=(--credential-dir "$(path_for /etc/netshare)");fi
+  "$(path_for /usr/local/bin/netshare)" "${add_args[@]}" >/dev/null
+  validate_config_layout "$output/controller.json" controller
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets;print(secrets.token_hex(4))')"
+  pairings="$(path_for /var/lib/netshare-bootstrap/pairings)/$stamp"
+  ensure_private_dir "$pairings"
+  python3 - "$output" "$pairings" <<'PYCODE'
+import os,pathlib,sys,tarfile
+output,dest=map(pathlib.Path,sys.argv[1:]);allowed={'agent.json','ca.pem','server.pem','server-key.pem'}
+for directory in sorted((output/'agents').iterdir()):
+    if directory.is_symlink() or not directory.is_dir() or {f.name for f in directory.iterdir()}!=allowed:raise SystemExit('签发结果不完整')
+    archive=dest/('netshare-node-'+directory.name+'.tar.gz')
+    with tarfile.open(archive,'w:gz') as tf:
+        for name in sorted(allowed):
+            leaf=directory/name
+            if leaf.is_symlink() or not leaf.is_file():raise SystemExit('节点凭据必须为普通文件')
+            info=tf.gettarinfo(str(leaf),arcname=directory.name+'/'+name);info.uid=info.gid=0;info.uname=info.gname='';info.mode=0o600
+            with leaf.open('rb') as content:tf.addfile(info,content)
+    os.chmod(archive,0o600)
+PYCODE
+  python3 - "$output/controller.json" "$cfg" <<'PYCODE'
+import os,pathlib,sys,tempfile
+source,target=map(pathlib.Path,sys.argv[1:]);original=target.stat();fd,tmp=tempfile.mkstemp(dir=target.parent,prefix='.'+target.name+'.')
+try:
+    with os.fdopen(fd,'wb') as stream:stream.write(source.read_bytes());stream.flush();os.fsync(stream.fileno())
+    os.chmod(tmp,original.st_mode&0o777)
+    if os.geteuid()==0:os.chown(tmp,original.st_uid,original.st_gid)
+    os.replace(tmp,target)
+finally:
+    if os.path.exists(tmp):os.unlink(tmp)
+PYCODE
+  if $TX_ACTIVE;then systemctl start netshare;controller_health;fi
+  TX_STARTED=false
+  say "节点已添加，控制台原有映射与启停状态保留。节点安装包目录：$pairings"
+  say '请把每个安装包安全复制到对应节点；包含私钥，勿上传公开网盘。'
+  say '所有已有节点也要导入这批更新包，才能允许与新节点互通；每台只用自己的包，历史映射状态会保留。'
+  say '在对应节点执行：netshare-manage install agent --pairing /安全路径/netshare-node-节点ID.tar.gz'
+}
+
 rotate_path() {
   ROLE=controller
   local cfg
@@ -513,7 +836,9 @@ uninstall_role() {
   systemctl daemon-reload
   if $PURGE; then
     # 删除目标固定为本角色标准目录，绝不接受用户传入的任意目录。
-    python3 - "$cfgdir" "$statedir" <<'PY'
+    local -a purge_paths=("$cfgdir" "$statedir")
+    if [[ "$ROLE" == controller ]]; then purge_paths+=("$(path_for /var/lib/netshare-bootstrap)");fi
+    python3 - "${purge_paths[@]}" <<'PY'
 import pathlib,shutil,sys
 for name in sys.argv[1:]:
     p=pathlib.Path(name)
@@ -544,34 +869,33 @@ menu_action() {
 }
 menu() {
   [[ -t 0 ]] || { usage;return 0; }
-  local choice action bundle source purge_choice response
+  setup_environment
+  local choice action pairing purge_choice response
   local -a args
   while :; do
     say '';say 'NetShare 管理'
     say '1 安装控制台  2 安装节点  3 升级  4 查看状态  5 查看日志'
-    say '6 启动  7 停止  8 重启  9 查看入口  10 更换入口  11 备份  12 卸载  0 退出'
+    say '6 启动  7 停止  8 重启  9 查看入口  10 更换入口  11 备份  12 卸载'
+    say '13 添加节点 / 生成节点安装包  0 退出'
     read -r -p '选择：' choice || break
     args=()
     case "$choice" in
       0)break;;
-      1|2)
-        if [[ "$choice" == 1 ]];then MENU_ROLE=controller;else MENU_ROLE=agent;fi
-        say "安装角色：${MENU_ROLE}。凭据应为这个角色对应的叶子目录，不能使用 authority。"
-        read -r -p '叶子凭据目录（已安装可留空保留现有配置，0 返回）：' bundle || break
-        [[ "$bundle" == 0 ]] && continue
-        read -r -p '发行来源（回车下载官方最新 Release；也可填本地目录/tar.gz）：' source || break
-        args=(install "$MENU_ROLE")
-        [[ -n "$bundle" ]] && args+=(--bundle "$bundle")
-        [[ -n "$source" ]] && args+=(--source "$source")
-        if [[ "$source" == https://* ]];then read -r -p '此自定义 HTTPS 包的 SHA256：' response || break;args+=(--sha256 "$response");fi
+      1)
+        args=(install controller)
+        ;;
+      2)
+        args=(install agent)
+        say '先在控制台的管理菜单生成节点安装包，安全复制到本机。'
+        read -r -p '节点安装包路径（已安装可回车保留现有配置，0 返回）：' pairing || break
+        [[ "$pairing" == 0 ]] && continue
+        [[ -n "$pairing" ]] && args+=(--pairing "$pairing")
         ;;
       3)
         menu_role || continue
-        read -r -p '发行来源（回车下载官方最新 Release；也可填本地目录/tar.gz）：' source || break
         args=(upgrade "$MENU_ROLE")
-        [[ -n "$source" ]] && args+=(--source "$source")
-        if [[ "$source" == https://* ]];then read -r -p '此自定义 HTTPS 包的 SHA256：' response || break;args+=(--sha256 "$response");fi
         ;;
+      13)args=(node add);;
       9)args=(entry);;
       10)
         say '将更换控制台入口，旧书签会失效；登录密码、映射与私网保持原样。'
@@ -616,17 +940,18 @@ main() {
   if [[ "$command" == help || "$command" == --help || "$command" == -h ]];then usage;return;fi
   if [[ "$command" == menu ]];then menu;return;fi
   shift
-  if [[ "$command" == path ]];then [[ "${1:-}" == rotate ]] || die '用法：netshare-manage path rotate';shift
+  if [[ "$command" == node ]];then [[ "${1:-}" == add ]] || die '用法：netshare-manage node add';shift;ROLE=controller
+  elif [[ "$command" == path ]];then [[ "${1:-}" == rotate ]] || die '用法：netshare-manage path rotate';shift
   elif [[ "$command" != entry ]];then ROLE="${1:-}";[[ $# -gt 0 ]] && shift;role_check "$ROLE";fi
   while [[ $# -gt 0 ]];do
     case "$1" in
-      --source|--bundle|--sha256|--lines) [[ $# -ge 2 ]] || die "缺少 $1 的值";case "$1" in --source)SOURCE="$2";;--bundle)BUNDLE="$2";;--sha256)EXPECTED_SHA="$2";;--lines)LOG_LINES="$2";;esac;shift 2 ;;
+      --source|--bundle|--pairing|--host|--port|--listen|--sha256|--lines|--id|--name|--public-ip|--private-ip|--public-interface|--private-interface) [[ $# -ge 2 ]] || die "缺少 $1 的值";case "$1" in --source)SOURCE="$2";;--bundle)BUNDLE="$2";;--pairing)PAIRING="$2";;--host)HOST="$2";;--port)PORT="$2";;--listen)LISTEN="$2";;--id)NODE_ID="$2";;--name)NODE_NAME="$2";;--public-ip)PUBLIC_IP="$2";;--private-ip)PRIVATE_IP="$2";;--public-interface)PUBLIC_INTERFACE="$2";;--private-interface)PRIVATE_INTERFACE="$2";;--sha256)EXPECTED_SHA="$2";;--lines)LOG_LINES="$2";;esac;shift 2 ;;
       --purge)PURGE=true;shift;;--no-start)NO_START=true;shift;;*)die "未知参数：$1";;
     esac
   done
   setup_environment
   case "$command" in
-    install)install_role;;upgrade)upgrade_role;;path)rotate_path;;backup)backup_role;;uninstall)uninstall_role;;
+    install)install_role;;upgrade)upgrade_role;;node)add_node;;path)rotate_path;;backup)backup_role;;uninstall)uninstall_role;;
     entry) [[ -f "$(config_for controller)" && -x "$(path_for /usr/local/bin/netshare)" ]] || die '控制台未安装';"$(path_for /usr/local/bin/netshare)" access-path show --config "$(config_for controller)" ;;
     start|stop|restart)lock_mutation;systemctl "$command" "$(unit_for "$ROLE")";if [[ "$command" != stop ]];then service_health;fi;;
     status)systemctl status "$(unit_for "$ROLE")" --no-pager;;

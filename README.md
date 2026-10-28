@@ -4,7 +4,7 @@
 bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh)
 ```
 
-在 Linux 服务器上运行后进入中文交互菜单，按提示安装、升级或卸载。脚本自动下载 [最新发行版](https://github.com/byJoey/netshare/releases/latest) 并校验 SHA256，支持 amd64、arm64。私网与配对凭据需先准备，完整步骤见下文。
+在控制台服务器上以 root 运行，选 `1 安装控制台`，端口直接回车默认 `18440`。脚本下载并校验 [最新发行版](https://github.com/byJoey/netshare/releases/latest)，自动生成密码、随机入口和节点证书，通过 `HTTP IP:端口` 打开空控制台。再用菜单 `13` 添加节点、生成配对包，到各节点选 `2 安装节点` 导入即可，无需编译或手写 JSON。支持 Linux amd64、arm64。
 
 ![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-amd64%20%7C%20arm64-333333?logo=linux&logoColor=white)
@@ -16,7 +16,7 @@ Go 编译为一个二进制，包含控制台、节点代理和前端资源。�
 
 ## 安装与维护脚本
 
-发行包自带 `manage.sh`，安装后可用 `netshare-manage` 菜单或子命令管理。支持安装控制台/节点、升级、启停、日志、备份、卸载和更换随机入口；完整参数与凭据准备见 [安装管理说明](deploy/MANAGER.md)。脚本不修改云平台私网，也不覆盖现有反向代理站点。
+发行包自带 `manage.sh`，安装后可用 `netshare-manage` 菜单或子命令管理。支持安装控制台/节点、节点配对、升级、启停、日志、备份、卸载和更换随机入口；完整参数见 [安装管理说明](deploy/MANAGER.md)。脚本不修改云平台私网，也不覆盖现有网站。
 
 新安装默认使用随机管理路径，首页、静态资源和 API 都位于该路径内。原根路径不会跳转到新入口。随机路径用于减少扫描和误访问，登录、会话和 CSRF 校验继续生效。显式执行 `netshare-manage entry` 可查看地址，`netshare-manage path rotate` 更换入口并检查新地址；旧入口会失效。
 
@@ -27,7 +27,7 @@ Go 编译为一个二进制，包含控制台、节点代理和前端资源。�
 - 机器在线情况、现有监听端口、网卡收发字节和规则版本。
 - 从入口机器检查目标服务的私网路由与 TCP 连通性。
 - 操作记录、配置导出，以及主动重新下发规则。
-- 登录会话、CSRF 校验和 HTTPS 管理入口。
+- 随机管理入口、登录会话与 CSRF 校验；支持自行配置 HTTPS 反向代理。
 
 控制台通过双向 TLS 连接私网代理。每台代理只接收控制台证书，只允许预先配置的目标私网 IP，且仅修改自己创建的 `ip netshare` nftables 表。
 
@@ -62,11 +62,72 @@ ping -c 3 10.42.0.11
 ss -lntup
 ```
 
-程序会保留 SSH 22 和清单中的 `reserved_ports`，并拒绝与本机公网监听或现有启用映射冲突的入口端口。如果控制台的 HTTPS 代理与节点部署在同机，给该节点保留 `80`、`443`。
+程序会保留 SSH 22 和清单中的 `reserved_ports`，并拒绝与本机公网监听或现有启用映射冲突的入口端口。控制台和节点同机时，不要把控制台端口用于业务映射。
 
 现有 UFW、iptables、nftables 或云防火墙仍按原规则工作。NetShare 不会清空它们，也不会越过其他防火墙的 `FORWARD DROP`。需要允许具体公网端口，以及两节点之间的相关转发和代理控制端口。
 
-## 构建与初始化
+## 一键安装
+
+推荐在 Ubuntu 24.04 的 systemd 主机部署。默认用服务器 IP 加端口通过 HTTP 访问，无需域名。选择一个空闲管理端口，并在云防火墙和本机防火墙放行它，默认是 `18440/tcp`。需要 HTTPS 时可以[自行配置反向代理](#可选自行反代-https)。
+
+### 1. 先装控制台
+
+在控制台服务器以 root 运行顶部 Bash，选 `1 安装控制台`，首次只问管理端口，直接回车用 `18440`。脚本自动识别本机 IPv4，默认监听 `0.0.0.0:18440`。
+
+脚本自动下载对应架构的正式包、校验 SHA256、生成一套内部 CA 和控制台凭据、随机管理员密码与管理路径。控制台先以空节点列表启动，不用等节点在线。
+
+终端显示完整入口、用户名 `admin` 和首次密码。也可在服务器查看：
+
+```bash
+sudo netshare-manage entry
+sudo cat /var/lib/netshare-bootstrap/controller/admin-password.txt
+```
+
+首次密码文件为 `0600`，在管理台改密码后不会自动更新它；请维护自己的密码库。CA 主私钥保存在 root 专用的 `/var/lib/netshare-bootstrap/authority/`，控制台进程无权读取。该目录用于后续签发节点凭据，要另做加密离机备份，不能放进代码仓库或公开网盘。
+
+安装完成后访问 `entry` 给出的完整地址，例如 `http://服务器IP:18440/随机路径/`。只打开 `http://服务器IP:18440/` 返回 404 正常。NAT 主机需要将管理端口映射到外部。首次安装时改用下面的命令，用 `--host` 指定实际访问的公网 IPv4：
+
+```bash
+bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh) install controller --port 18440 --host 192.0.2.10
+```
+
+自动识别不查询第三方 IP 服务。未找到本机全局 IPv4 时会采用默认路由网卡上的候选地址。访问地址参与 Origin 校验；已安装后需要改 NAT 公网地址时，修改 `/etc/netshare/controller.json` 的 `external_url` 为实际 `http://公网IP:端口`，保持随机路径、密码和状态不动，再执行 `sudo netshare-manage restart controller`。只换浏览器地址不会生效。
+
+已有 `/etc/netshare/controller.json` 时，安装保留原监听、访问地址、密码、证书和映射，不重新问端口或生成 CA。
+
+### 2. 添加节点，生成配对包
+
+在控制台服务器运行 `sudo netshare-manage`，选 `13 添加节点/生成安装包`，按提示填节点 ID、显示名称、公网 IP、私网 IP、公网网卡和私网网卡。网卡用 `ip -br addr`、`ip -4 route get 对端私网IP` 核实，不要照抄别人的 `eth0`、`eth1`。
+
+控制台会复用原 CA，为当前所有节点生成各自的配对包，保存到：
+
+```text
+/var/lib/netshare-bootstrap/pairings/<时间与随机标识>/netshare-node-<节点ID>.tar.gz
+```
+
+目录为 `0700`、包为 `0600`。每个包只包含该节点的配置和叶子证书，不含 CA 主私钥或管理员密码。通过可信 SSH 把对应包传到对应节点，包括与控制台同机运行的节点。
+
+添加新节点后，**已安装节点也要导入本轮为它生成的新包**。代理的目标白名单需要包含新增的私网 IP；只装新节点会让旧节点拒绝转发到它。按节点 ID 分发，不能把 A 的包用于 B。
+
+### 3. 在每台节点导入
+
+每台节点运行开头的 Bash，选 `2 安装节点`，填写自己那份配对包路径。已安装的机器可直接运行 `sudo netshare-manage`。脚本保留代理状态和已有映射，只更新对应配置与凭据；节点 ID 或 CA 不匹配的包会被拒绝。
+
+也可使用命令：
+
+```bash
+sudo netshare-manage install agent --pairing /root/netshare-node-edge-a.tar.gz
+```
+
+没有 `netshare-manage` 的新主机先运行顶部安装入口。顶部命令需要 `curl`；在 Debian / Ubuntu 上，安装器会自动补齐 Python 3 及节点需要的 `nftables`、`iproute2`。其他发行版先自行安装 Python 3、`nft`、`ip`、`ss`。
+
+所有节点导入完成后，在控制台确认在线，再创建映射。两节点至少要能通过私网互通；安装和配对不会开通云私网、修改网卡或恢复已经关闭的私网。
+
+## 高级手动部署
+
+下面用于离线部署、批量清单初始化或自行管理 CA 的场景。普通安装使用前面的一键流程即可；需要 HTTPS 也可在已有安装上自行反代。
+
+### 构建与初始化
 
 已下载发行包的用户可跳过源码构建，直接运行解压目录里的 `./netshare init` 准备凭据。只有从源码编译时需要 Go 1.26 或更新版本；重建界面另需 Node.js 22.12+。
 
@@ -87,7 +148,7 @@ cp deploy/nodes.example.json nodes.json
   --domain netshare.example.com
 ```
 
-`--listen` 默认 `127.0.0.1:18440`，只允许回环地址；对外访问交给 HTTPS 反向代理。`--agent-port` 默认 `31880`，仅绑定各节点的私网 IP。
+上述 `init --nodes --domain` 手工方式默认监听 `127.0.0.1:18440`，配合自己的 HTTPS 反向代理。`--agent-port` 默认 `31880`，仅绑定各节点的私网 IP。
 
 初始化会生成一套互相匹配的凭据，所有目录为 `0700`、文件为 `0600`。已有目录会被拒绝，避免重跑初始化意外更换 CA 或密码。屏幕只输出文件位置，管理员密码写在 `secrets/controller/admin-password.txt`，用户名为 `admin`。
 
@@ -108,9 +169,9 @@ secrets/
 
 控制台配置只保存 bcrypt 密码摘要。首次密码文件只在初始化时生成；之后在管理台修改密码不会更新这份文件，请同步维护自己的密码库。生产部署无需向服务器复制 `admin-password.txt`，留在本机受限目录保管即可。
 
-不要把 `secrets/`、CA 私钥、配置文件或真实机器清单提交到代码仓库。每个节点只接收自己的 `agents/<id>/` 文件；CA 私钥不需要上传到任何运行中的服务。单个控制台支持 2–32 台机器。
+不要把 `secrets/`、CA 私钥、配置文件或真实机器清单提交到代码仓库。每个节点只接收自己的 `agents/<id>/` 文件；离线初始化时，CA 私钥留在离线环境，不放到控制台进程可读的位置。批量清单初始化要求 2–32 台机器；一键安装允许先启动空控制台，再逐步添加，最多 32 台。
 
-## 安装到 Linux
+### 手动安装到 Linux
 
 下面的命令针对 systemd 主机。先把二进制、对应配置目录和 `deploy/` 文件通过可信 SSH 连接传到目标机器，再以 root 安装。控制台和其中一个节点可以运行在同一台机器。
 
@@ -153,9 +214,11 @@ systemctl enable --now netshare-agent
 
 代理保留 `CAP_NET_ADMIN`，用于 nftables 和 IPv4 转发。systemd 只放开状态目录、`/etc/sysctl.d` 和 IPv4 sysctl 的必要写入。控制台使用无特权用户，只能写自己的配置和状态目录，修改密码时会原子更新 `/etc/netshare/controller.json`；它不能直接改系统防火墙。
 
-## 开通 HTTPS
+### 可选：自行反代 HTTPS
 
-把管理台域名的 DNS 记录指向控制台主机。使用 [Caddy 配置模板](deploy/Caddyfile)，把 `netshare.example.com` 改成初始化时填写的域名。让公网 `80/tcp`、`443/tcp` 能到达 Caddy。
+需要 HTTPS 时，由自己安装 Caddy、Nginx 等反向代理。将管理域名解析到代理主机，修改 `/etc/netshare/controller.json`：`external_url` 填 `https://你的域名`，`cookie_secure` 设为 `true`；同机反代可将 `listen` 改回 `127.0.0.1:18440`，重启 `netshare`。转发整个站点，保留随机前缀。
+
+使用 [Caddy 配置模板](deploy/Caddyfile)时，将 `netshare.example.com` 换成自己的域名。旧的 `init --nodes --domain` 手工初始化已经生成 HTTPS 访问配置，可直接使用。
 
 在全新主机上安装 Caddy 后，可以把修改后的模板安装为 `/etc/caddy/Caddyfile`；已有站点则将这一个站点块并入现有配置，先备份原文件。
 
@@ -164,7 +227,7 @@ caddy validate --config /etc/caddy/Caddyfile
 systemctl reload caddy
 ```
 
-执行 `sudo netshare-manage entry` 查看完整随机入口，再通过该地址登录；手动部署时可用 `sudo /usr/local/bin/netshare access-path show --config /etc/netshare/controller.json` 查看。裸域名返回 404 属于正常行为。公网不需要开放 `18440`；控制台 HTTP 只监听回环。私网代理 `31880` 不向公网监听，且没有有效的控制台客户端证书就无法调用。
+配置完成后执行 `sudo netshare-manage entry` 查看完整随机入口；手动部署时可用 `sudo /usr/local/bin/netshare access-path show --config /etc/netshare/controller.json` 查看。仅在已改回回环监听并由反代提供公网入口时，才无需对外开放控制台端口。节点的私网代理 `31880` 不向公网监听，且没有有效的控制台客户端证书就无法调用。
 
 默认 Caddy 模板不启用访问日志，避免完整随机入口被写入请求记录。需要额外访问日志时，先配置路径脱敏。
 
@@ -224,58 +287,31 @@ openssl x509 -in /etc/netshare-agent/server.pem -noout -enddate
 
 ## 备份与恢复
 
-控制台备份配置及状态；节点备份各自配置及状态。备份文件同样包含私钥，使用受限目录并做离机保护。
-
-控制台主机：
+在对应主机执行，备份保存在 `/var/backups/netshare/`：
 
 ```bash
-umask 077
-install -d -m 0700 /var/backups/netshare
-systemctl stop netshare
-tar -C / -czf "/var/backups/netshare/controller-$(date +%Y%m%d-%H%M%S).tar.gz" etc/netshare var/lib/netshare
-systemctl start netshare
+sudo netshare-manage backup controller
+sudo netshare-manage backup agent
 ```
 
-每台节点：
+控制台备份覆盖运行配置和状态，以及 `/var/lib/netshare-bootstrap` 内的 CA 与配对资料；代理备份自己的配置、状态和规则。自行配置的反向代理另做备份。备份含私钥，应在受限目录保存，并做加密离机保护。
 
-```bash
-umask 077
-install -d -m 0700 /var/backups/netshare
-systemctl stop netshare-agent
-tar -C / -czf "/var/backups/netshare/agent-$(date +%Y%m%d-%H%M%S).tar.gz" etc/netshare-agent var/lib/netshare-agent
-systemctl start netshare-agent
-```
+管理脚本在安装、升级、节点添加、入口轮换和卸载前也会创建稳定快照；失败时自动恢复本次操作前的文件和原启停状态。备份命令自身不停机，需要跨文件同一时刻快照时，先停止相应角色。
 
-恢复时先停止相应服务，解包到原路径，控制台目录重新确认归属 `netshare:netshare`、目录 `0700`、文件 `0600`，然后启动服务。代理必须恢复到相同节点，不能把 A 的配置和私钥放到 B。在界面检查两端状态后再使用「同步规则」。
-
-更换二进制前保留上一版本，检查发行包的 `SHA256SUMS`，用同目录新文件原子替换 `/usr/local/bin/netshare`，再重启对应服务。升级失败时换回旧二进制并恢复本次升级前的状态备份。
+手动恢复按快照中的 `manifest.json` 还原文件、uid/gid/mode；只恢复对应节点，不将 A 的凭据放到 B，不用旧状态覆盖后来新增的业务规则。详细方法见 [管理说明](deploy/MANAGER.md#备份与回退)。自行部署且没有管理脚本时，要一并备份自己的反向代理与离线 CA。
 
 ## 卸载与回退
 
-先在控制台停用或删除该入口上的全部映射，并确认变更已应用。之后在相应主机停止服务：
-
 ```bash
-systemctl disable --now netshare-agent
-# 确认只针对 NetShare 的独立表操作。
-nft delete table ip netshare
-rm -f /etc/sysctl.d/90-netshare-agent.conf
-rm -f /etc/systemd/system/netshare-agent.service
-systemctl daemon-reload
+sudo netshare-manage uninstall agent
+sudo netshare-manage uninstall controller
 ```
 
-删除此表会停止新的映射连接，已有 conntrack 会话仍可能存活。需要立即切断某条连接时，按该映射的原始公网地址、协议、端口精确清理连接跟踪；不要清空整机连接表。
+在对应主机执行，默认停止并禁用指定服务、移除服务文件，保留配置、证书、状态、初始化资料和备份。自行配置的反向代理不受影响。
 
-根据节点状态里保存的 `original_forwarding` 决定是否恢复 `net.ipv4.ip_forward`。若 Docker、VPN 或其他服务已经在使用转发，不要直接将其设为 `0`。删掉本工具的 sysctl 文件不会自动重置当前内核值。
+节点卸载只删除 `table ip netshare` 与 `/etc/sysctl.d/90-netshare-agent.conf`，不清空其他 nftables 表或整机 conntrack，也不直接将全局 IPv4 转发改回 `0`。删除规则会停止匹配的新连接，已有连接可能自然结束。
 
-控制台卸载：
-
-```bash
-systemctl disable --now netshare
-rm -f /etc/systemd/system/netshare.service
-systemctl daemon-reload
-```
-
-配置和状态默认保留，便于重新安装。确认不再需要后，再单独处理 `/etc/netshare`、`/var/lib/netshare`、`/etc/netshare-agent`、`/var/lib/netshare-agent` 和离线凭据。控制台与代理共用一个二进制，只有两个角色都卸载后才删除 `/usr/local/bin/netshare`。若移除域名入口，只删除 Caddy 中本服务的站点块，再验证并重新加载配置。
+需要删除这个角色的数据时，显式加 `--purge`。控制台彻底清理包含 CA 主私钥和配对资料，先确认已经备份。所有快照始终保留。控制台与代理共用一个二进制，只有两个角色都卸载后才删除程序。详见 [卸载说明](deploy/MANAGER.md#卸载)。
 
 ## 开发与发行包
 
@@ -286,7 +322,7 @@ npm --prefix frontend ci
 npm --prefix frontend run build
 go test -race ./...
 go vet ./...
-VERSION=v1.2.0 bash ./build.sh
+VERSION=v1.2.1 bash ./build.sh
 ```
 
 `build.sh` 会按锁文件安装并重建前端，将全部静态资源编译进 Go 程序；先编译前端再运行 Go 测试，才能验证本次的真实资源。前端源文件变更后不要只运行 `go build`，否则会带上旧的静态页面。

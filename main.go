@@ -19,7 +19,7 @@ import (
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("用法: netshare init|serve|agent|access-path|version")
+		return fmt.Errorf("用法: netshare init|node|check-agent|serve|agent|access-path|version")
 	}
 	switch args[0] {
 	case "version", "--version", "-version":
@@ -27,6 +27,10 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "init":
 		return bootstrap.Run(args[1:])
+	case "node":
+		return bootstrap.NodeCommand(args[1:])
+	case "check-agent":
+		return agent.CheckCommand(ctx, args[1:])
 	case "access-path":
 		return control.AccessPathCommand(args[1:], os.Stdout)
 	case "serve", "agent":
@@ -50,7 +54,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		return control.Run(ctx, *path, assets)
 	default:
-		return fmt.Errorf("未知命令 %q；可用 init、serve、agent、access-path、version", args[0])
+		return fmt.Errorf("未知命令 %q；可用 init、node、check-agent、serve、agent、access-path、version", args[0])
 	}
 }
 func main() {

@@ -36,11 +36,13 @@ const (
 )
 
 type options struct {
-	dir       string
-	nodesFile string
-	domain    string
-	listen    string
-	agentPort int
+	dir         string
+	nodesFile   string
+	standalone  bool
+	domain      string
+	externalURL string
+	listen      string
+	agentPort   int
 }
 
 type controllerConfig struct {
@@ -91,7 +93,9 @@ func Run(args []string) error {
 	var opt options
 	fs.StringVar(&opt.dir, "dir", "", "新建的私密配置目录，必须尚不存在")
 	fs.StringVar(&opt.nodesFile, "nodes", "", "机器清单 JSON 文件")
+	fs.BoolVar(&opt.standalone, "standalone", false, "先安装空控制台，之后通过 node add 配对节点")
 	fs.StringVar(&opt.domain, "domain", "", "管理台域名，例如 netshare.example.com")
+	fs.StringVar(&opt.externalURL, "external-url", "", "空控制台的直接访问地址，例如 http://192.0.2.10:18440")
 	fs.StringVar(&opt.listen, "listen", defaultListen, "控制台本地监听地址")
 	fs.IntVar(&opt.agentPort, "agent-port", defaultAgentPort, "私网代理监听端口")
 	if err := fs.Parse(args); err != nil {
@@ -104,27 +108,48 @@ func Run(args []string) error {
 		return err
 	}
 	abs, _ := filepath.Abs(opt.dir)
-	fmt.Fprintf(os.Stdout, "初始化完成，配置目录：%s\n管理员密码文件：%s\n内部 CA 私钥只保留在 authority 目录，不要部署到服务器。\n", abs, filepath.Join(abs, "controller", "admin-password.txt"))
+	fmt.Fprintf(os.Stdout, "初始化完成，配置目录：%s\n管理员密码文件：%s\n内部 CA 私钥只保留在 authority 目录，不要交给 Web 服务或节点。\n", abs, filepath.Join(abs, "controller", "admin-password.txt"))
 	return nil
 }
 
 func initialize(opt options) error {
-	if strings.TrimSpace(opt.dir) == "" || strings.TrimSpace(opt.nodesFile) == "" {
-		return fmt.Errorf("请提供 --dir 和 --nodes")
+	if strings.TrimSpace(opt.dir) == "" || (!opt.standalone && strings.TrimSpace(opt.nodesFile) == "") {
+		return fmt.Errorf("请提供 --dir，以及 --nodes 或 --standalone")
 	}
-	domain, err := validateDomain(opt.domain)
-	if err != nil {
-		return err
+	if opt.standalone && opt.nodesFile != "" {
+		return fmt.Errorf("--standalone 不能与 --nodes 同时使用")
 	}
-	if err := validateListen(opt.listen); err != nil {
-		return err
+	var domain, externalURL string
+	cookieSecure := true
+	var err error
+	if opt.externalURL != "" {
+		if !opt.standalone || opt.domain != "" {
+			return fmt.Errorf("--external-url 仅用于 --standalone，不能与 --domain 同时使用")
+		}
+		externalURL, err = validateDirectHTTP(opt.externalURL, opt.listen)
+		if err != nil {
+			return err
+		}
+		cookieSecure = false
+	} else {
+		domain, err = validateDomain(opt.domain)
+		if err != nil {
+			return err
+		}
+		if err = validateListen(opt.listen); err != nil {
+			return err
+		}
+		externalURL = "https://" + domain
 	}
 	if opt.agentPort < 1 || opt.agentPort > 65535 || opt.agentPort == 22 {
 		return fmt.Errorf("代理端口必须为 1–65535 且不能使用 SSH 22")
 	}
-	nodes, err := readNodes(opt.nodesFile, opt.agentPort)
-	if err != nil {
-		return err
+	nodes := []model.Node{}
+	if !opt.standalone {
+		nodes, err = readNodes(opt.nodesFile, opt.agentPort)
+		if err != nil {
+			return err
+		}
 	}
 	abs, err := filepath.Abs(opt.dir)
 	if err != nil {
@@ -167,7 +192,7 @@ func initialize(opt options) error {
 	if err != nil {
 		return err
 	}
-	controller := controllerConfig{Listen: opt.listen, ExternalURL: "https://" + domain, AccessPath: accessPath, Username: "admin", PasswordHash: string(hash), StateFile: "/var/lib/netshare/state.json", CAFile: "/etc/netshare/ca.pem", CertFile: "/etc/netshare/controller.pem", KeyFile: "/etc/netshare/controller-key.pem", CookieSecure: true, Nodes: nodes}
+	controller := controllerConfig{Listen: opt.listen, ExternalURL: externalURL, AccessPath: accessPath, Username: "admin", PasswordHash: string(hash), StateFile: "/var/lib/netshare/state.json", CAFile: "/etc/netshare/ca.pem", CertFile: "/etc/netshare/controller.pem", KeyFile: "/etc/netshare/controller-key.pem", CookieSecure: cookieSecure, Nodes: nodes}
 	files["controller/controller.json"], err = marshal(controller)
 	if err != nil {
 		return err
@@ -199,11 +224,16 @@ func initialize(opt options) error {
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(filepath.Dir(abs), 0700); err != nil {
+	return writeBundle(abs, files)
+}
+
+// writeBundle 排他创建私密导出目录，失败时删除本次尚未完整写出的内容。
+func writeBundle(abs string, files map[string][]byte) error {
+	if err := os.MkdirAll(filepath.Dir(abs), 0700); err != nil {
 		return fmt.Errorf("创建父目录失败：%w", err)
 	}
 	// Mkdir 的排他语义保证并发初始化不会覆盖另一套凭据。
-	if err = os.Mkdir(abs, 0700); err != nil {
+	if err := os.Mkdir(abs, 0700); err != nil {
 		return fmt.Errorf("创建新配置目录失败：%w", err)
 	}
 	success := false
@@ -219,10 +249,10 @@ func initialize(opt options) error {
 	sort.Strings(paths)
 	for _, path := range paths {
 		full := filepath.Join(abs, path)
-		if err = os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
 			return fmt.Errorf("创建私密子目录失败：%w", err)
 		}
-		if err = writePrivate(full, files[path]); err != nil {
+		if err := writePrivate(full, files[path]); err != nil {
 			return err
 		}
 	}
@@ -310,6 +340,30 @@ func validateListen(value string) error {
 	return nil
 }
 
+func validateDirectHTTP(value, listen string) (string, error) {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "http" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || u.Path != "" {
+		return "", fmt.Errorf("--external-url 应为 http://IPv4:端口，不带路径")
+	}
+	ip := net.ParseIP(u.Hostname())
+	if ip == nil || ip.To4() == nil || ip.IsUnspecified() || ip.IsMulticast() {
+		return "", fmt.Errorf("--external-url 需要可访问的 IPv4 地址")
+	}
+	p, err := strconv.Atoi(u.Port())
+	if err != nil || p < 1 || p > 65535 {
+		return "", fmt.Errorf("--external-url 需要 1–65535 的明确端口")
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil || net.ParseIP(host) == nil || net.ParseIP(host).To4() == nil || net.ParseIP(host).IsMulticast() {
+		return "", fmt.Errorf("直接访问模式需要明确的 IPv4 监听地址，例如 0.0.0.0:18440")
+	}
+	listenPort, err := strconv.Atoi(port)
+	if err != nil || listenPort != p {
+		return "", fmt.Errorf("直接访问地址端口必须与监听端口相同")
+	}
+	return "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(p)), nil
+}
+
 func validateDomain(value string) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if len(value) > 253 || len(value) < 3 || !strings.Contains(value, ".") || net.ParseIP(value) != nil {
@@ -358,7 +412,11 @@ func makeLeaf(now time.Time, cn string, ip net.IP, usage []x509.ExtKeyUsage, ca 
 	if err != nil {
 		return certificate{}, err
 	}
-	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: cn, Organization: []string{"NetShare"}}, NotBefore: now.Add(-5 * time.Minute), NotAfter: now.AddDate(2, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: usage, BasicConstraintsValid: true}
+	expires := now.AddDate(2, 0, 0)
+	if expires.After(ca.cert.NotAfter) {
+		expires = ca.cert.NotAfter
+	}
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: cn, Organization: []string{"NetShare"}}, NotBefore: now.Add(-5 * time.Minute), NotAfter: expires, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: usage, BasicConstraintsValid: true}
 	if ip != nil {
 		template.IPAddresses = []net.IP{ip}
 	}

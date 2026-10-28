@@ -158,9 +158,7 @@ func NewServer(cfg Config, runner CommandRunner) (*Server, error) {
 		}
 		s.allowed[ip] = true
 	}
-	if len(s.allowed) == 0 {
-		return nil, fmt.Errorf("至少配置一个允许的私网目标")
-	}
+	// 首台节点可先在线待配对；空白名单仍拒绝所有转发目标。
 	s.state = diskState{NodeID: cfg.Node.ID, Rules: []model.AgentRule{}}
 	data, err := os.ReadFile(cfg.StateFile)
 	if err == nil {

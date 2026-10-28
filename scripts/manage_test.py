@@ -2,6 +2,7 @@
 """隔离管理脚本生命周期验证：真实文件操作，systemd/nft 仅使用沙箱模拟。"""
 import hashlib
 import http.server
+import io
 import json
 import os
 import errno
@@ -16,6 +17,7 @@ import tarfile
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 PROJECT = Path(__file__).resolve().parents[1]
 MANAGER = PROJECT / "manage.sh"
@@ -99,6 +101,16 @@ shutil.copyfile(src,dest)
 
 
 class Lifecycle(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.real_build = tempfile.TemporaryDirectory(prefix="netshare-manager-real-binary-")
+        cls.real_binary = Path(cls.real_build.name) / "netshare"
+        subprocess.run(["go", "build", "-o", str(cls.real_binary), "."], cwd=PROJECT, check=True, capture_output=True, timeout=120)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.real_build.cleanup()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="netshare-manager-test-")
         self.base = Path(self.temp.name).resolve()
@@ -111,7 +123,8 @@ class Lifecycle(unittest.TestCase):
         self.env = {**os.environ, "NETSHARE_TEST_MODE": "1", "NETSHARE_TEST_ROOT": str(self.root), "PATH": str(self.tools) + os.pathsep + os.environ["PATH"]}
         self.write_exec(self.tools / "systemctl", SYSTEMCTL)
         self.write_exec(self.tools / "nft", NFT)
-        for name in ("ip", "ss", "journalctl"):
+        self.write_exec(self.tools / "ip", "#!/usr/bin/env python3\nimport json,sys\na=sys.argv[1:]\nif a==['-j','route','show','default']:print(json.dumps([{'dev':'eth0'}]))\nelif a==['-j','address','show']:print(json.dumps([{'ifname':'eth0','addr_info':[{'family':'inet','local':'203.0.113.10'}]}]))\nelse:print('[]')\n")
+        for name in ("ss", "journalctl"):
             self.write_exec(self.tools / name, "#!/usr/bin/env bash\nprintf '%s\\n' '测试命令'\n")
         self.package = self.make_package("1.2.0", "release")
         root = self.root
@@ -248,6 +261,203 @@ class Lifecycle(unittest.TestCase):
         self.assertNotIn("unbound variable", text)
         return text
 
+    def real_package(self):
+        package = self.make_package("1.2.1", "real-release")
+        shutil.copy2(self.real_binary, package / "netshare")
+        self.env["NETSHARE_TEST_REAL_BINARY"] = "1"
+        return package
+
+    def install_real_controller(self):
+        package = self.real_package()
+        result = self.run_manager("install", "controller", "--host", "203.0.113.50", "--port", str(self.server.server_port), "--source", package, "--no-start")
+        return package, result
+
+    def add_real_node(self, node_id, public_ip, private_ip):
+        return self.run_manager("node", "add", "--id", node_id, "--name", node_id.upper(), "--public-ip", public_ip, "--private-ip", private_ip, "--public-interface", "eth0", "--private-interface", "eth1")
+
+    def latest_pairing(self, node_id):
+        candidates = list((self.root / "var/lib/netshare-bootstrap/pairings").glob("*/netshare-node-" + node_id + ".tar.gz"))
+        self.assertTrue(candidates)
+        return max(candidates, key=lambda p: p.stat().st_mtime_ns)
+
+    def test_real_standalone_init_automatic_credentials_and_http_layout(self):
+        package, result = self.install_real_controller()
+        cfg = self.config()
+        self.assertEqual(cfg["nodes"], [])
+        self.assertEqual(cfg["external_url"], "http://203.0.113.50:" + str(self.server.server_port))
+        self.assertEqual(cfg["listen"], "0.0.0.0:" + str(self.server.server_port))
+        self.assertFalse(cfg["cookie_secure"])
+        self.assertRegex(cfg["access_path"], r"^/ns-[0-9a-f]{32}$")
+        bootstrap = self.root / "var/lib/netshare-bootstrap"
+        password = (bootstrap / "controller/admin-password.txt").read_text().strip()
+        self.assertGreaterEqual(len(password), 24)
+        self.assertNotIn(password, result.stdout + result.stderr)
+        self.assertTrue((bootstrap / "authority/ca-key.pem").is_file())
+        self.assertFalse((self.root / "etc/netshare/authority").exists())
+        self.assertFalse((self.root / "etc/netshare/admin-password.txt").exists())
+        for item in bootstrap.rglob("*"):
+            self.assertEqual(stat.S_IMODE(item.stat().st_mode), 0o700 if item.is_dir() else 0o600)
+        self.assertFalse((self.root / "etc/netshare-web").exists())
+        self.assertFalse((self.root / "usr/local/libexec/netshare-caddy").exists())
+        self.assertFalse(self.service("netshare")["active"])
+        original = (self.root / "etc/netshare/controller.json").read_bytes()
+        ca = (bootstrap / "authority/ca-key.pem").read_bytes()
+        self.run_manager("install", "controller", "--source", package, "--no-start")
+        self.assertEqual((self.root / "etc/netshare/controller.json").read_bytes(), original)
+        self.assertEqual((bootstrap / "authority/ca-key.pem").read_bytes(), ca)
+
+    def test_real_node_pairing_updates_existing_node_without_losing_state(self):
+        package, _ = self.install_real_controller()
+        state = self.root / "var/lib/netshare/state.json"
+        state.write_text('{"revision":7,"mappings":[],"events":[]}')
+        original_state = state.read_bytes()
+        original_password = (self.root / "var/lib/netshare-bootstrap/controller/admin-password.txt").read_bytes()
+        self.add_real_node("node-a", "203.0.113.10", "10.42.0.10")
+        first = self.latest_pairing("node-a")
+        self.run_manager("install", "agent", "--source", package, "--pairing", first, "--no-start")
+        agent_cfg = self.root / "etc/netshare-agent/agent.json"
+        self.assertEqual(json.loads(agent_cfg.read_text())["allowed_targets"], [])
+        agent_state = self.root / "var/lib/netshare-agent/state.json"
+        agent_state.write_text('{"node_id":"node-a","revision":11,"rules":[]}')
+        saved_agent_state = agent_state.read_bytes()
+        self.add_real_node("node-b", "203.0.113.11", "10.42.0.11")
+        update = self.latest_pairing("node-a")
+        self.run_manager("install", "agent", "--source", package, "--pairing", update, "--no-start")
+        self.assertEqual(json.loads(agent_cfg.read_text())["allowed_targets"], ["10.42.0.11"])
+        self.assertEqual(agent_state.read_bytes(), saved_agent_state)
+        self.assertEqual(state.read_bytes(), original_state)
+        self.assertEqual((self.root / "var/lib/netshare-bootstrap/controller/admin-password.txt").read_bytes(), original_password)
+        before = agent_cfg.read_bytes()
+        wrong_node = self.latest_pairing("node-b")
+        result = self.run_manager("install", "agent", "--source", package, "--pairing", wrong_node, "--no-start", ok=False)
+        self.assertIn("ID", result.stderr)
+        self.assertEqual(agent_cfg.read_bytes(), before)
+        for archive in (first, update, wrong_node):
+            self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o600)
+            with tarfile.open(archive) as tf:
+                self.assertEqual({Path(m.name).name for m in tf.getmembers()}, {"agent.json", "ca.pem", "server.pem", "server-key.pem"})
+
+    def test_real_automatic_install_failure_rolls_back_generated_authority(self):
+        package = self.real_package()
+        (self.root / "fail-start-once").touch()
+        self.run_manager("install", "controller", "--host", "203.0.113.50", "--port", str(self.server.server_port), "--source", package, ok=False)
+        for item in ("etc/netshare", "var/lib/netshare", "var/lib/netshare-bootstrap"):
+            self.assertFalse((self.root / item).exists(), item)
+        self.assertFalse(self.service("netshare")["active"])
+
+    def test_real_default_release_install_needs_only_port(self):
+        self.package = self.real_package()
+        self.release_fixture()
+        result = self.run_manager("install", "controller", "--host", "203.0.113.50", "--port", str(self.server.server_port))
+        self.assertTrue(self.service("netshare")["active"])
+        self.assertEqual(self.config()["nodes"], [])
+        self.assertEqual(len((self.root / "downloads.log").read_text().splitlines()), 3)
+        self.assertIn("管理入口", result.stdout)
+        self.assertTrue((self.root / "var/lib/netshare-bootstrap/authority/ca-key.pem").exists())
+
+    def test_fresh_menu_only_asks_port_and_returns_after_invalid_input(self):
+        self.package = self.real_package()
+        self.release_fixture()
+        text = self.run_menu("1\n0\n1\n" + str(self.server.server_port) + "\n0\n")
+        self.assertIn("控制台端口 [18440]", text)
+        self.assertIn("本次操作未完成", text)
+        self.assertIn("安装完成：controller", text)
+        self.assertNotIn("管理台域名", text)
+        self.assertNotIn("叶子凭据目录", text)
+        self.assertNotIn("发行来源", text)
+        self.assertEqual(self.config()["external_url"], "http://203.0.113.10:" + str(self.server.server_port))
+        self.assertFalse(self.config()["cookie_secure"])
+        self.assertTrue(self.service("netshare")["active"])
+
+    def test_real_invalid_pairing_certificate_is_rejected_before_transaction(self):
+        package, _ = self.install_real_controller()
+        self.add_real_node("node-a", "203.0.113.10", "10.42.0.10")
+        pairing = self.latest_pairing("node-a")
+        self.run_manager("install", "agent", "--source", package, "--pairing", pairing, "--no-start")
+        before = (self.root / "etc/netshare-agent/agent.json").read_bytes()
+        commands = len(self.commands())
+        invalid = self.base / "invalid-pairing.tar.gz"
+        content_dir = self.base / "invalid-pairing"
+        content_dir.mkdir()
+        with tarfile.open(pairing) as source:
+            source.extractall(content_dir)
+        (content_dir / "node-a/server-key.pem").write_text("不是节点私钥")
+        with tarfile.open(invalid, "w:gz") as target:
+            target.add(content_dir / "node-a", arcname="node-a")
+        result = self.run_manager("install", "agent", "--source", package, "--pairing", invalid, "--no-start", ok=False)
+        self.assertIn("节点证书", result.stderr)
+        self.assertEqual((self.root / "etc/netshare-agent/agent.json").read_bytes(), before)
+        self.assertFalse(any("systemctl stop netshare-agent" in value for value in self.commands()[commands:]))
+        self.assertFalse(list((self.root / "var/backups/netshare").glob("*agent/manifest.json"))[1:])
+
+    def test_http_default_port_and_keep_uninstall_reinstall_purge(self):
+        package = self.real_package()
+        self.run_manager("install", "controller", "--source", package, "--no-start")
+        self.assertEqual(self.config()["listen"], "0.0.0.0:18440")
+        self.assertEqual(self.config()["external_url"], "http://203.0.113.10:18440")
+        self.assertFalse(self.config()["cookie_secure"])
+        bootstrap = (self.root / "var/lib/netshare-bootstrap/authority/ca-key.pem").read_bytes()
+        cfg = (self.root / "etc/netshare/controller.json").read_bytes()
+        self.run_manager("uninstall", "controller")
+        self.assertTrue((self.root / "var/lib/netshare-bootstrap").exists())
+        self.run_manager("install", "controller", "--source", package, "--no-start")
+        self.assertEqual((self.root / "etc/netshare/controller.json").read_bytes(), cfg)
+        self.assertEqual((self.root / "var/lib/netshare-bootstrap/authority/ca-key.pem").read_bytes(), bootstrap)
+        self.run_manager("uninstall", "controller", "--purge")
+        self.assertFalse((self.root / "var/lib/netshare-bootstrap").exists())
+        self.assertFalse((self.root / "etc/netshare").exists())
+
+    def test_direct_die_inside_transaction_restores_original_service_state(self):
+        package = self.real_package()
+        bootstrap = self.root / "var/lib/netshare-bootstrap/authority"
+        bootstrap.mkdir(parents=True)
+        (bootstrap / "ca-key.pem").write_text("保留原 CA，不应被替换")
+        original = self.root / "usr/local/bin/netshare"
+        original.parent.mkdir(parents=True)
+        self.write_exec(original, "#!/usr/bin/env bash\nprintf '%s\\n' '原程序'\n")
+        old_program = original.read_bytes()
+        (self.root / "services.json").write_text(json.dumps({"netshare": {"active": True, "enabled": True}}))
+        result = self.run_manager("install", "controller", "--host", "203.0.113.50", "--source", package, ok=False)
+        self.assertIn("已有初始化资料", result.stderr)
+        self.assertIn("回退", result.stderr)
+        self.assertEqual(original.read_bytes(), old_program)
+        self.assertEqual((bootstrap / "ca-key.pem").read_text(), "保留原 CA，不应被替换")
+        self.assertTrue(self.service("netshare")["active"])
+        self.assertTrue(self.service("netshare")["enabled"])
+        self.assertFalse((self.root / "etc/netshare").exists())
+
+    def test_controller_health_only_allows_verified_local_ipv4(self):
+        # 执行实际脚本内的 Python 段；网卡清单和 HTTP 响应隔离，确保远程地址在发请求前拒绝。
+        source = MANAGER.read_text().split("controller_health() {\n", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        script = compile(source, str(MANAGER) + ":controller_health", "exec")
+        cfg = self.base / "health-config.json"
+        fixture = json.dumps([{"ifname": "eth0", "addr_info": [{"family": "inet", "local": "192.0.2.10"}]}]).encode()
+        class Response(io.BytesIO):
+            status = 200
+        class Opener:
+            def __init__(self):
+                self.urls = []
+            def open(self, url, **_):
+                self.urls.append(url)
+                return Response(b'{"ok":true}')
+        for host, allowed in (("192.0.2.10", True), ("192.0.2.20", False), ("0.0.0.0", True), ("127.0.0.1", True), ("[::1]", True)):
+            with self.subTest(host=host):
+                cfg.write_text(json.dumps({"listen": host + ":18440", "access_path": "/ns-isolated-test-entry"}))
+                opener = Opener()
+                with mock.patch("sys.argv", ["-", str(cfg)]), mock.patch("subprocess.check_output", return_value=fixture) as ip_command, mock.patch("urllib.request.build_opener", return_value=opener):
+                    if allowed:
+                        exec(script, {"__name__": "__main__"})
+                        expected = "127.0.0.1" if host == "0.0.0.0" else host
+                        self.assertEqual(opener.urls, ["http://" + expected + ":18440/ns-isolated-test-entry/healthz"])
+                    else:
+                        with self.assertRaisesRegex(SystemExit, "拒绝探测远程地址"):
+                            exec(script, {"__name__": "__main__"})
+                        self.assertEqual(opener.urls, [])
+                if host.startswith("192."):
+                    ip_command.assert_called_once_with(["ip", "-j", "-4", "address", "show"], stderr=subprocess.DEVNULL, timeout=5)
+                else:
+                    ip_command.assert_not_called()
+
     def test_default_official_release_download_and_exact_checksum(self):
         config = self.release_fixture()
         self.run_manager("install", "controller", "--bundle", self.controller_bundle)
@@ -268,7 +478,8 @@ class Lifecycle(unittest.TestCase):
 
     def test_menu_loops_after_failure_and_install_defaults_release(self):
         self.release_fixture()
-        text = self.run_menu("99\n9\n1\n" + str(self.controller_bundle) + "\n\n3\n1\n\n4\n1\n0\n")
+        self.install("controller")
+        text = self.run_menu("99\n13\n1\n3\n1\n4\n1\n0\n")
         self.assertIn("无效选择", text)
         self.assertIn("本次操作未完成", text)
         self.assertIn("安装完成：controller", text)
@@ -295,7 +506,8 @@ class Lifecycle(unittest.TestCase):
         result = self.install("controller")
         initial = self.config()
         self.assertRegex(initial["access_path"], r"^/ns-[0-9a-f]{32}$")
-        self.assertNotIn(initial["access_path"], result.stdout + result.stderr)
+        self.assertIn(initial["access_path"], result.stdout)
+        self.assertNotIn("不应复制的首次密码", result.stdout + result.stderr)
         self.assertTrue(self.service("netshare")["active"])
         self.assertEqual(stat.S_IMODE((self.root / "etc/netshare/controller.json").stat().st_mode), 0o600)
         self.assertFalse((self.root / "etc/netshare/admin-password.txt").exists())

@@ -115,7 +115,7 @@ func clientIP(r *http.Request) string {
 	if e != nil {
 		return r.RemoteAddr
 	}
-	// HTTP 只监听回环；仅信任本机反向代理重写后的单一访客地址。
+	// 仅在连接来自回环地址时，信任本机反向代理重写后的单一访客地址。
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		if forwarded := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Forwarded-For"))); forwarded != nil {
 			return forwarded.String()

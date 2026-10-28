@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -47,10 +48,6 @@ func LoadConfig(path string) (Config, error) {
 	if d.Decode(&extra) != io.EOF {
 		return cfg, fmt.Errorf("配置文件中存在多余内容")
 	}
-	host, _, err := net.SplitHostPort(cfg.Listen)
-	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
-		return cfg, fmt.Errorf("控制台 HTTP 仅允许监听回环地址，请通过 HTTPS 反向代理发布")
-	}
 	if !filepath.IsAbs(cfg.StateFile) {
 		return cfg, fmt.Errorf("状态文件必须使用绝对路径")
 	}
@@ -70,8 +67,20 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.CookieSecure && u.Scheme != "https" {
 		return cfg, fmt.Errorf("线上安全会话必须使用 HTTPS external_url")
 	}
-	if len(cfg.Nodes) < 2 || len(cfg.Nodes) > 32 {
-		return cfg, fmt.Errorf("需要配置 2–32 台机器")
+	host, port, err := net.SplitHostPort(cfg.Listen)
+	ip := net.ParseIP(host)
+	if err != nil || ip == nil {
+		return cfg, fmt.Errorf("控制台需要明确的 IP 监听地址")
+	}
+	if !ip.IsLoopback() {
+		p, portErr := strconv.Atoi(port)
+		if ip.To4() == nil || ip.IsMulticast() || portErr != nil || p < 1 || p > 65535 || u.Scheme != "http" || cfg.CookieSecure {
+			return cfg, fmt.Errorf("公网 IPv4 直连必须使用 HTTP external_url 和非 Secure 会话；HTTPS 反向代理模式请监听回环地址")
+		}
+	}
+	// 空控制台先完成安全安装，配对两台机器后即可创建映射。
+	if len(cfg.Nodes) > 32 {
+		return cfg, fmt.Errorf("最多配置 32 台机器")
 	}
 	seen := map[string]bool{}
 	ips := map[string]bool{}
