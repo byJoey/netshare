@@ -8,7 +8,9 @@ import os
 import errno
 import pty
 import select
+import socket
 import time
+import types
 from pathlib import Path
 import shutil
 import stat
@@ -123,7 +125,7 @@ class Lifecycle(unittest.TestCase):
         self.env = {**os.environ, "NETSHARE_TEST_MODE": "1", "NETSHARE_TEST_ROOT": str(self.root), "PATH": str(self.tools) + os.pathsep + os.environ["PATH"]}
         self.write_exec(self.tools / "systemctl", SYSTEMCTL)
         self.write_exec(self.tools / "nft", NFT)
-        self.write_exec(self.tools / "ip", "#!/usr/bin/env python3\nimport json,sys\na=sys.argv[1:]\nif a==['-j','route','show','default']:print(json.dumps([{'dev':'eth0'}]))\nelif a==['-j','address','show']:print(json.dumps([{'ifname':'eth0','addr_info':[{'family':'inet','local':'203.0.113.10'}]}]))\nelse:print('[]')\n")
+        self.write_exec(self.tools / "ip", "#!/usr/bin/env python3\nimport json,sys\na=sys.argv[1:]\nif a==['-j','route','show','default']:print(json.dumps([{'dev':'eth0'}]))\nelif a in (['-j','address','show'],['-j','-4','address','show']):print(json.dumps([{'ifname':'eth0','addr_info':[{'family':'inet','local':'203.0.113.10'}]}]))\nelse:print('[]')\n")
         for name in ("ss", "journalctl"):
             self.write_exec(self.tools / name, "#!/usr/bin/env bash\nprintf '%s\\n' '测试命令'\n")
         self.package = self.make_package("1.2.0", "release")
@@ -141,7 +143,25 @@ class Lifecycle(unittest.TestCase):
                 self.send_response(200 if ok else 503)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"ok": ok}).encode())
+                self.wfile.write(json.dumps({"ok": ok, "version": (root / "running-version.txt").read_text().strip() if (root / "running-version.txt").exists() else "1.2.2"}).encode())
+            def do_POST(self):
+                cfg = json.loads((root / "etc/netshare/controller.json").read_text())
+                prefix = cfg.get("access_path", "") + "/api/enroll/"
+                with (root / "post-paths.log").open("a") as log:
+                    log.write(self.path + "\n")
+                token = self.path[len(prefix):] if self.path.startswith(prefix) else ""
+                source = root / "var/lib/netshare/enrollments" / (token + ".json")
+                if not token or "/" in token or not source.is_file():
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                payload = source.read_bytes()
+                source.unlink()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Health)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -265,6 +285,7 @@ class Lifecycle(unittest.TestCase):
         package = self.make_package("1.2.1", "real-release")
         shutil.copy2(self.real_binary, package / "netshare")
         self.env["NETSHARE_TEST_REAL_BINARY"] = "1"
+        self.current_real_package = package
         return package
 
     def install_real_controller(self):
@@ -273,7 +294,7 @@ class Lifecycle(unittest.TestCase):
         return package, result
 
     def add_real_node(self, node_id, public_ip, private_ip):
-        return self.run_manager("node", "add", "--id", node_id, "--name", node_id.upper(), "--public-ip", public_ip, "--private-ip", private_ip, "--public-interface", "eth0", "--private-interface", "eth1")
+        return self.run_manager("node", "add", "--source", self.current_real_package, "--id", node_id, "--name", node_id.upper(), "--public-ip", public_ip, "--private-ip", private_ip, "--public-interface", "eth0", "--private-interface", "eth1")
 
     def latest_pairing(self, node_id):
         candidates = list((self.root / "var/lib/netshare-bootstrap/pairings").glob("*/netshare-node-" + node_id + ".tar.gz"))
@@ -457,6 +478,254 @@ class Lifecycle(unittest.TestCase):
                     ip_command.assert_called_once_with(["ip", "-j", "-4", "address", "show"], stderr=subprocess.DEVNULL, timeout=5)
                 else:
                     ip_command.assert_not_called()
+
+    def test_empty_remote_agent_input_does_not_download_or_install(self):
+        self.release_fixture()
+        text = self.run_menu("2\n\n0\n")
+        self.assertIn("接入", text)
+        self.assertFalse((self.root / "downloads.log").exists(), "空节点输入不应查询或下载发行")
+        self.assertFalse((self.root / "usr/local/bin/netshare").exists())
+        self.assertFalse((self.root / "etc/netshare-agent").exists())
+
+    def test_local_controller_without_private_interface_does_not_download(self):
+        self.install_real_controller()
+        self.release_fixture()
+        text = self.run_menu("2\n\n0\n")
+        self.assertIn("私网", text)
+        self.assertFalse((self.root / "downloads.log").exists(), "本机没有私网时不能先下载节点程序")
+        self.assertFalse((self.root / "etc/netshare-agent").exists())
+
+    def set_local_network(self, *, multiple=False):
+        interfaces = [{"ifname": "eth0", "addr_info": [{"family": "inet", "local": "203.0.113.10"}]}, {"ifname": "eth1", "addr_info": [{"family": "inet", "local": "10.42.0.10"}]}]
+        if multiple:
+            interfaces.append({"ifname": "eth2", "addr_info": [{"family": "inet", "local": "10.43.0.10"}]})
+        code = "#!/usr/bin/env python3\nimport json,sys\na=sys.argv[1:]\nif a==['-j','route','show','default']:print(json.dumps([{'dev':'eth0'}]))\nelse:print(" + repr(json.dumps(interfaces)) + ")\n"
+        self.write_exec(self.tools / "ip", code)
+
+    def test_local_menu_registers_and_updates_same_node_without_copying_files(self):
+        self.package, _ = self.install_real_controller()
+        self.set_local_network()
+        self.release_fixture()
+        text = self.run_menu("2\n0\n")
+        self.assertIn("本机节点", text)
+        self.assertIn("安装完成：agent", text)
+        self.assertNotIn("节点安装包路径", text)
+        nodes = self.config()["nodes"]
+        self.assertEqual(len(nodes), 1)
+        node_id = nodes[0]["id"]
+        self.assertEqual(json.loads((self.root / "etc/netshare-agent/agent.json").read_text())["node"]["id"], node_id)
+        self.add_real_node("node-b", "203.0.113.11", "10.42.0.11")
+        saved = self.root / "var/lib/netshare-agent/state.json"
+        saved.write_text(json.dumps({"node_id": node_id, "revision": 17, "rules": []}))
+        before = saved.read_bytes()
+        text = self.run_menu("2\n0\n")
+        self.assertIn("安装完成：agent", text)
+        self.assertEqual(len(self.config()["nodes"]), 2)
+        self.assertEqual(saved.read_bytes(), before)
+        self.assertEqual(json.loads((self.root / "etc/netshare-agent/agent.json").read_text())["allowed_targets"], ["10.42.0.11"])
+
+    def test_local_ambiguous_interfaces_cancel_before_download(self):
+        self.package, _ = self.install_real_controller()
+        self.set_local_network(multiple=True)
+        self.release_fixture()
+        text = self.run_menu("2\n0\n0\n")
+        self.assertIn("选择本机网卡组合", text)
+        self.assertFalse((self.root / "downloads.log").exists())
+        self.assertEqual(self.config()["nodes"], [])
+
+    def test_join_receipt_fetch_one_time_and_resend_existing_node(self):
+        self.package, _ = self.install_real_controller()
+        cfg = self.config()
+        cfg["external_url"] = "http://127.0.0.1:" + str(self.server.server_port)
+        (self.root / "etc/netshare/controller.json").write_text(json.dumps(cfg))
+        self.add_real_node("node-a", "203.0.113.10", "10.42.0.10")
+        receipt_file = self.latest_pairing("node-a").parent / "node-node-a-invite.json"
+        receipt = json.loads(receipt_file.read_text())
+        self.assertEqual(stat.S_IMODE(receipt_file.stat().st_mode), 0o600)
+        self.run_manager("install", "agent", "--source", self.package, "--join", receipt["invitation"], "--no-start")
+        posts = (self.root / "post-paths.log").read_text()
+        self.assertNotIn(receipt["key"], posts)
+        self.assertNotIn("#", posts)
+        retained = list((self.root / "var/backups/netshare-imports").glob("*/pairing.tar.gz"))
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(stat.S_IMODE(retained[0].stat().st_mode), 0o600)
+        result = self.run_manager("install", "agent", "--source", self.package, "--join", receipt["invitation"], "--no-start", ok=False)
+        self.assertIn("重新生成", result.stderr)
+        self.run_manager("node", "invite", "--id", "node-a", "--source", self.package)
+        self.assertEqual(len(self.config()["nodes"]), 1)
+        new_receipt = json.loads((self.latest_pairing("node-a").parent / "node-node-a-invite.json").read_text())
+        self.assertNotEqual(new_receipt["invitation"], receipt["invitation"])
+        self.run_manager("install", "agent", "--source", self.package, "--join", new_receipt["invitation"], "--no-start")
+
+    def test_invalid_pairing_or_join_input_fails_before_release_download(self):
+        self.release_fixture()
+        self.run_manager("install", "agent", "--pairing", self.base / "does-not-exist.tar.gz", ok=False)
+        self.run_manager("install", "agent", "--join", "not-an-invitation", ok=False)
+        self.assertFalse((self.root / "downloads.log").exists())
+        self.assertFalse((self.root / "etc/netshare-agent").exists())
+
+    def test_missing_python_only_bootstraps_after_valid_material(self):
+        prefix = MANAGER.read_text().rsplit('main "$@"', 1)[0]
+        invitation = 'http://127.0.0.1:18440/ns-test-entry/api/enroll/' + 'a' * 32 + '#' + 'A' * 43
+        for value, expected in (("", False), ("invalid", False), (invitation, True)):
+            with self.subTest(value="valid" if expected else value):
+                marker = self.base / "python-installed"
+                marker.unlink(missing_ok=True)
+                harness = self.base / "inspect-python.sh"
+                harness.write_text(prefix + '''
+ROLE=agent
+ROOT_PREFIX="$NETSHARE_TEST_ROOT"
+JOIN="$INSPECT_JOIN"
+command() {
+  if [[ "$1" == -v && "${2:-}" == python3 && ! -f "$INSPECT_MARKER" ]];then return 1;fi
+  builtin command "$@"
+}
+ensure_dependencies() {
+  [[ "${1:-}" == base ]] || exit 91
+  printf 'base\\n' > "$INSPECT_MARKER"
+}
+ensure_inspection_python
+''')
+                env = {**self.env, "INSPECT_JOIN": value, "INSPECT_MARKER": str(marker)}
+                result = subprocess.run(["bash", str(harness)], env=env, capture_output=True, text=True, timeout=10)
+                if value == "invalid":
+                    self.assertNotEqual(result.returncode, 0)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(marker.exists(), expected)
+
+    def test_invitation_access_is_granted_before_commands_are_printed(self):
+        self.package, _ = self.install_real_controller()
+        self.add_real_node("node-a", "203.0.113.10", "10.42.0.10")
+        pairings = self.latest_pairing("node-a").parent
+        audit = self.base / "publish-order.log"
+        harness = self.base / "publish-order.sh"
+        prefix = MANAGER.read_text().rsplit('main "$@"', 1)[0]
+        harness.write_text(prefix + '''
+ROOT_PREFIX="$NETSHARE_TEST_ROOT"
+TEST_MODE=true
+grant_enrollment_access() { printf 'granted\\n' >> "$INVITE_AUDIT"; }
+say() {
+  if [[ "$*" == *'的接入命令'* ]];then printf 'printed\\n' >> "$INVITE_AUDIT";fi
+  printf '%s\\n' "$*"
+}
+emit_invitations "$INVITE_PAIRINGS" node-a
+''')
+        result = subprocess.run(["bash", str(harness)], env={**self.env, "INVITE_AUDIT": str(audit), "INVITE_PAIRINGS": str(pairings)}, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(audit.read_text().splitlines(), ["granted", "printed"])
+        source = MANAGER.read_text().split("grant_enrollment_access() {\n", 1)[1].split("<<'PYCODE'\n", 1)[1].split("\nPYCODE\n", 1)[0]
+        directory = self.base / "cipher-directory"
+        directory.mkdir()
+        ciphertext = directory / "token.json"
+        ciphertext.write_text("ciphertext")
+        receipt = self.base / "root-receipt.json"
+        receipt.write_text("root-only key")
+        with mock.patch("sys.argv", ["-", str(directory)]), mock.patch("pwd.getpwnam", return_value=types.SimpleNamespace(pw_uid=1234, pw_gid=1234)), mock.patch("os.chown") as chown:
+            exec(compile(source, str(MANAGER) + ":grant_enrollment_access", "exec"), {"__name__": "__main__"})
+        self.assertEqual({str(value.args[0]) for value in chown.call_args_list}, {str(directory), str(ciphertext)})
+        for value in chown.call_args_list:
+            self.assertEqual(value.args[1:], (1234, 1234))
+            self.assertFalse(value.kwargs["follow_symlinks"])
+        self.assertNotIn(str(receipt), {str(value.args[0]) for value in chown.call_args_list})
+
+    def test_agent_creates_shared_sysctl_directory_with_traversable_permissions(self):
+        target = self.root / "etc/sysctl.d"
+        self.assertFalse(target.exists())
+        self.install("agent")
+        self.assertTrue(target.is_dir())
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+        foreign = target / "50-other-service.conf"
+        foreign.write_text("别的服务配置")
+        self.run_manager("uninstall", "agent", "--purge")
+        self.assertTrue(target.is_dir())
+        self.assertEqual(foreign.read_text(), "别的服务配置")
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+
+    def test_agent_preserves_existing_shared_directory_permissions_and_rejects_symlink(self):
+        target = self.root / "etc/sysctl.d"
+        target.mkdir(parents=True)
+        target.chmod(0o750)
+        foreign = target / "50-foreign.conf"
+        foreign.write_text("保留")
+        self.install("agent")
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o750)
+        self.run_manager("uninstall", "agent", "--purge")
+        outside = self.base / "outside-sysctl"
+        target.rename(outside)
+        target.symlink_to(outside, target_is_directory=True)
+        before = len(self.commands())
+        self.install("agent", ok=False)
+        self.assertTrue(target.is_symlink())
+        self.assertEqual((outside / "50-foreign.conf").read_text(), "保留")
+        self.assertFalse(any("systemctl stop netshare-agent" in item for item in self.commands()[before:]))
+        self.assertFalse((self.root / "etc/netshare-agent").exists())
+
+    def test_agent_failure_rolls_back_owned_paths_and_keeps_shared_sysctl_directory(self):
+        (self.root / "fail-start-once").touch()
+        self.install("agent", ok=False)
+        target = self.root / "etc/sysctl.d"
+        self.assertTrue(target.is_dir())
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+        for item in ("etc/netshare-agent", "var/lib/netshare-agent", "usr/local/bin/netshare", "etc/systemd/system/netshare-agent.service", "usr/local/sbin/netshare-manage", "etc/sysctl.d/90-netshare-agent.conf"):
+            self.assertFalse((self.root / item).exists(), item)
+        self.assertFalse(self.service("netshare-agent")["active"])
+
+    def test_local_node_retry_after_agent_start_failure_reuses_registered_id(self):
+        self.package, _ = self.install_real_controller()
+        self.set_local_network()
+        self.release_fixture()
+        (self.root / "fail-start-once").touch()
+        first = self.run_menu("2\n0\n")
+        self.assertIn("本次操作未完成", first)
+        self.assertEqual(len(self.config()["nodes"]), 1)
+        node_id = self.config()["nodes"][0]["id"]
+        self.assertFalse((self.root / "etc/netshare-agent").exists())
+        second = self.run_menu("2\n0\n")
+        self.assertIn("安装完成：agent", second)
+        self.assertEqual(len(self.config()["nodes"]), 1)
+        self.assertEqual(self.config()["nodes"][0]["id"], node_id)
+        self.assertTrue(self.service("netshare-agent")["active"])
+        self.assertEqual(stat.S_IMODE((self.root / "etc/sysctl.d").stat().st_mode), 0o755)
+
+    def test_controller_port_probe_allows_time_wait_but_rejects_active_listener(self):
+        source = MANAGER.read_text().split("initialize_controller() {\n", 1)[1].split("python3 - \"$BUNDLE/controller.json\" <<'PYCODE'\n", 1)[1].split("\nPYCODE\n", 1)[0]
+        script = compile(source, str(MANAGER) + ":controller_port_probe", "exec")
+        cfg = self.base / "port-probe-config.json"
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        peer = None
+        try:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            port = listener.getsockname()[1]
+            cfg.write_text(json.dumps({"listen": "127.0.0.1:" + str(port)}))
+            with mock.patch("sys.argv", ["-", str(cfg)]):
+                with self.assertRaisesRegex(SystemExit, "已被占用"):
+                    exec(script, {"__name__": "__main__"})
+            client.settimeout(3)
+            client.connect(("127.0.0.1", port))
+            peer, _ = listener.accept()
+            peer.settimeout(3)
+            peer.shutdown(socket.SHUT_WR)
+            self.assertEqual(client.recv(1), b"")
+            client.close()
+            self.assertEqual(peer.recv(1), b"")
+            peer.close()
+            listener.close()
+            # 服务端先发 FIN：端口只有 TIME_WAIT，旧的无 REUSEADDR 探测必须精确复现假冲突。
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as old_probe:
+                with self.assertRaises(OSError) as failure:
+                    old_probe.bind(("127.0.0.1", port))
+                self.assertEqual(failure.exception.errno, errno.EADDRINUSE)
+            with mock.patch("sys.argv", ["-", str(cfg)]):
+                exec(script, {"__name__": "__main__"})
+        finally:
+            if peer is not None:
+                peer.close()
+            client.close()
+            listener.close()
 
     def test_default_official_release_download_and_exact_checksum(self):
         config = self.release_fixture()

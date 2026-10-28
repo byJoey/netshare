@@ -6,7 +6,7 @@ bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/in
 
 在控制台服务器以 root 运行上面的命令，选 `1 安装控制台`，端口直接回车默认 `18440`。脚本自动识别架构、获取官方最新稳定 Release、校验 SHA256，生成配置与凭据，通过 `HTTP IP:端口` 启动管理台。普通安装不需要域名、Go、Node.js、机器清单 JSON 或手动整理证书目录。
 
-控制台装好后，菜单 `13 添加节点/生成安装包` 生成节点配对包；到各节点选 `2 安装节点` 导入自己的包。安装后使用 `sudo netshare-manage` 打开中文菜单。
+控制台同机选 `2 接入 / 安装节点` 可自动接入；其他机器用菜单 `13 添加远端节点 / 生成接入命令` 给出的完整命令安装。命令失效后从菜单 `14 重发节点接入命令` 重新生成。安装后使用 `sudo netshare-manage` 打开中文菜单。
 
 ## 环境要求
 
@@ -74,44 +74,63 @@ sudoedit /etc/netshare/controller.json
 sudo netshare-manage start controller
 ```
 
-## 添加节点与配对
+## 接入控制台所在机器
 
-先在各节点用 `ip -br addr` 查看网卡和地址，用 `ip -4 route get 对端私网IP` 确认私网路由。公网 IP、私网 IP、公网网卡和私网网卡都要填写本机实际值。
+在控制台服务器运行 `sudo netshare-manage`，选 `2 接入 / 安装节点`。本机有控制台和原 CA 时，向导自动识别本机地址与网卡，登记并安装本机节点，无需找配对包路径。
 
-在控制台服务器运行 `sudo netshare-manage`，选 `13 添加节点/生成安装包`，按提示填节点 ID、名称及上述网络信息。节点 ID 只用字母、数字、下划线或连字符；一套控制台最多 32 个节点。
+公网、私网地址和网卡只有一组明确候选时，直接使用；多个候选才列出编号让你选择。没有独立私网时，向导会先说明需要配好的网卡与地址，再返回，不会先装依赖或下载程序。它不创建云私网、不修改网卡或路由。
 
-脚本先备份并保留控制台状态，再复用原 CA 添加节点，生成当前所有节点的对应配对包：
+已有匹配的本机节点会复用原 ID，不重复登记。本机已有代理时，再选 `2` 会导出当前控制台配置对应的包并就地导入，更新目标白名单、保留代理状态和已有映射。
 
-```text
-/var/lib/netshare-bootstrap/pairings/<时间与随机标识>/netshare-node-<节点ID>.tar.gz
-```
+## 接入其他机器
 
-目录权限 `0700`，包权限 `0600`。每包仅含自己的 `agent.json`、CA 公钥证书、节点叶子证书和私钥，不含 CA 主私钥、管理员密码或其他节点私钥。通过可信 SSH 分发对应包；和控制台同机部署的节点也需要自己的包。
+先在远端用 `ip -br addr` 查看网卡和地址，用 `ip -4 route get 对端私网IP` 确认私网路由。公网 IP、私网 IP、公网网卡和私网网卡都填远端实际值，不能沿用控制台主机探测到的值。
 
-**每次添加节点后，所有已安装节点都要导入本轮的新包。**旧节点的目标白名单需要包含新节点的私网 IP。否则新节点即使在线，旧节点仍会拒绝向它转发。可先添加完所有计划节点，再用最后一轮的包逐台安装。
+在控制台服务器选 `13 添加远端节点 / 生成接入命令`，填写节点 ID、名称和网络信息。节点 ID 只用字母、数字、下划线或连字符，一套控制台最多 32 个节点。脚本先备份并保留控制台状态，再复用原 CA 为各节点生成对应凭据。
 
-每台节点运行顶部 Bash，选 `2 安装节点`，只填自己的配对包路径。已安装管理脚本时也可执行：
+终端显示每个节点各自的一次性安装命令。复制完整命令到对应节点执行，不必手工复制证书或 tar 包。示例只表示格式，实际值由控制台生成：
 
 ```bash
-sudo netshare-manage install agent --pairing /root/netshare-node-edge-a.tar.gz
+bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh) install agent --join '控制台生成的完整URL#KEY'
 ```
 
-导入会替换该节点配置和叶子凭据，保留原代理状态与已有映射。节点 ID 或 CA 与已安装节点不匹配会被拒绝，不要互换 A、B 的包。全部导入后，在控制台确认在线，再创建映射。
-
-控制台节点添加命令示例，地址均为文档示例，必须替换：
+已有管理脚本时，也可以：
 
 ```bash
-sudo netshare-manage node add \
-  --id edge-a --name 节点A \
-  --public-ip 192.0.2.10 --private-ip 10.42.0.10 \
-  --public-interface eth0 --private-interface eth1
+sudo netshare-manage install agent --join '控制台生成的完整URL#KEY'
 ```
 
-该操作按原启停状态恢复控制台，新节点尚未安装或离线不会阻止进入已有控制台。它不配置节点的 Linux 网卡、IP 或路由。
+远端直接选菜单 `2` 时，会提供“粘贴接入码”“导入安装包”“返回”；远端已经装过代理时，也可选择按原配置重装。没有资料、空输入或选 `0` 会先返回，不安装节点依赖、不下载发行包。
 
-从旧版本或手动部署迁移时，需要匹配当前控制台证书的原 CA 主私钥，不能临时生成另一套 CA。若服务器没有这套初始化资料，先恢复对应受限备份，或继续用高级手工凭据部署。
+接入码默认 15 分钟有效、领取一次后失效。密文在控制台暂存，解密密钥只在接入串的 `#` 后，不随 HTTP 请求发送；CA 主私钥和管理员密码不交给远端。完整命令仍包含凭据，请私下传给对应节点，别放进公开日志或截图。
+
+首次领取就消费，网络中断、解密密钥填错或超时后需要重新生成。回到控制台选 `14 重发节点接入命令`，选择原节点，不必把同一机器重复添加。
+
+领取并解密成功后，安装器会将包保存到 `/var/backups/netshare-imports/时间-随机标识/pairing.tar.gz`，目录 `0700`、文件 `0600`。后续网卡检查或安装失败时，按终端给出的路径使用 `install agent --pairing` 重试，无需再次领取；不要直接重跑已消费的接入码。
+
+```bash
+sudo netshare-manage node invite --id edge-a
+```
+
+省略 `--id` 时交互选择已有节点。添加远端节点的非交互示例，地址为文档示例，必须替换：
+
+```bash
+sudo netshare-manage node add   --id edge-a --name 节点A   --public-ip 192.0.2.10 --private-ip 10.42.0.10   --public-interface eth0 --private-interface eth1
+```
+
+### 更新已有节点
+
+**新增节点后，旧节点也要执行本轮为自己生成的更新命令。**原代理的目标白名单需要包含新节点的私网 IP，否则可能只有一个方向能通。控制台同机的旧代理也需要更新，可以再次选 `2` 就地完成；菜单 `13` 本身不会顺手重启已有代理。
+
+每个节点只用自己的命令。导入更新会替换该节点配置和叶子凭据，保留原代理状态与已有映射；节点 ID 或 CA 不匹配会被拒绝。所有节点更新完成后，在控制台确认在线，再创建新映射。
+
+使用旧版控制台时，脚本会先更新控制台的接入能力，保留原配置、映射与节点运行进程。节点添加操作按原启停状态恢复控制台，新节点还没安装或离线不会阻止进入已有控制台。它只登记信息，不会修复节点本身的私网配置。
+
+从旧版本或手动部署迁移时，需要匹配当前控制台证书的原 CA 主私钥。服务器缺少这套签发资料时，恢复对应受限备份或继续使用高级手工凭据方式，不能临时生成另一套 CA。
 
 ## 高级安装与离线包
+
+无法从节点连接控制台时，仍可安全传输对应配对包，使用 `install agent --pairing /路径/包.tar.gz`。控制台导出的包位于 `/var/lib/netshare-bootstrap/pairings/`，目录 `0700`、文件 `0600`；每包只含该节点配置和叶子凭据，不含 CA 主私钥或管理员密码。
 
 离线 CA 或批量机器清单的用户，可按 [README 高级手动部署](../README.md#高级手动部署)准备同一 CA 的叶子凭据，再显式导入：
 
@@ -120,7 +139,7 @@ sudo bash ./manage.sh install controller --bundle /私密目录/controller --sou
 sudo bash ./manage.sh install agent --bundle /私密目录/agents/edge-a --source .
 ```
 
-批量清单初始化方式仍需先部署全部代理，再首次启动带节点的控制台；空控制台一键流程不受此顺序限制。只安装文件、暂不启动时加 `--no-start`。安装已有角色默认保留原配置，明确指定 `--pairing` 才会导入节点更新包。
+批量清单初始化方式仍需先部署全部代理，再首次启动带节点的控制台；空控制台一键流程不受此顺序限制。只安装文件、暂不启动时加 `--no-start`。安装已有角色默认保留原配置，明确指定 `--pairing` 或 `--join` 才会导入节点更新凭据。
 
 也可从 [GitHub Releases](https://github.com/byJoey/netshare/releases) 下载对应包，核对 `SHA256SUMS` 后解压。交互菜单仍会获取官方最新稳定版；离线使用当前目录要明确传 `--source .`：
 
@@ -241,8 +260,8 @@ sudo netshare-manage uninstall agent --purge
 bash -n manage.sh
 python3 scripts/manage_test.py
 python3 scripts/release_package_test.py \
-  dist/netshare_v1.2.1_linux_amd64.tar.gz \
-  dist/netshare_v1.2.1_linux_arm64.tar.gz \
+  dist/netshare_v1.2.2_linux_amd64.tar.gz \
+  dist/netshare_v1.2.2_linux_arm64.tar.gz \
   --sums dist/SHA256SUMS
 ```
 

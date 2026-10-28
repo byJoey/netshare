@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
+	"netshare/internal/enrollment"
 	"netshare/internal/model"
 )
 
@@ -50,6 +51,9 @@ func (c *Controller) Handler(assets fs.FS) http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "version": model.Version})
+	})
+	m.HandleFunc("POST /api/enroll/{token}", func(w http.ResponseWriter, r *http.Request) {
+		enrollment.Serve(enrollment.Directory(c.cfg.StateFile), w, r, r.PathValue("token"))
 	})
 	m.HandleFunc("GET /api/session", c.handleSession)
 	m.HandleFunc("POST /api/login", c.handleLogin)

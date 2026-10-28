@@ -183,6 +183,45 @@ func TestAddNodeExportsSameCAPairingAndPreservesController(t *testing.T) {
 	}
 }
 
+func TestNodeExportReissuesAllPeersWithoutChangingSource(t *testing.T) {
+	dir, path, cfg := standaloneBundle(t)
+	first := filepath.Join(filepath.Dir(dir), "first-export-source")
+	if err := addNode(addOptions(dir, path, first, testNodes()[0])); err != nil {
+		t.Fatal(err)
+	}
+	second := filepath.Join(filepath.Dir(dir), "second-export-source")
+	source := filepath.Join(first, "controller.json")
+	if err := addNode(addOptions(dir, source, second, testNodes()[1])); err != nil {
+		t.Fatal(err)
+	}
+	source = filepath.Join(second, "controller.json")
+	before, _ := os.ReadFile(source)
+	caKeyBefore, _ := os.ReadFile(filepath.Join(dir, "authority/ca-key.pem"))
+	output := filepath.Join(filepath.Dir(dir), "exported")
+	opt := addOptions(dir, source, output, model.Node{})
+	opt.exportOnly = true
+	if err := addNode(opt); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(source)
+	candidate, _ := os.ReadFile(filepath.Join(output, "controller.json"))
+	caKeyAfter, _ := os.ReadFile(filepath.Join(dir, "authority/ca-key.pem"))
+	if !bytes.Equal(before, after) || !bytes.Equal(before, candidate) || !bytes.Equal(caKeyBefore, caKeyAfter) {
+		t.Fatal("重新导出修改了原配置或CA")
+	}
+	entries, err := os.ReadDir(filepath.Join(output, "agents"))
+	if err != nil || len(entries) != 2 {
+		t.Fatal("必须导出所有既有节点", err)
+	}
+	original, err := control.LoadConfig(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if original.PasswordHash != cfg.PasswordHash || original.AccessPath != cfg.AccessPath || len(original.Nodes) != 2 {
+		t.Fatal("导出误改密码/入口/节点")
+	}
+}
+
 func TestCheckAgentRejectsWrongCAIdentityStateAndAddress(t *testing.T) {
 	dir, path, _ := standaloneBundle(t)
 	out := filepath.Join(filepath.Dir(dir), "paired")

@@ -4,7 +4,7 @@
 bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh)
 ```
 
-在控制台服务器上以 root 运行，选 `1 安装控制台`，端口直接回车默认 `18440`。脚本下载并校验 [最新发行版](https://github.com/byJoey/netshare/releases/latest)，自动生成密码、随机入口和节点证书，通过 `HTTP IP:端口` 打开空控制台。再用菜单 `13` 添加节点、生成配对包，到各节点选 `2 安装节点` 导入即可，无需编译或手写 JSON。支持 Linux amd64、arm64。
+在控制台服务器上以 root 运行，选 `1 安装控制台`，端口直接回车默认 `18440`。脚本下载并校验 [最新发行版](https://github.com/byJoey/netshare/releases/latest)，自动生成密码、随机入口和节点证书，通过 `HTTP IP:端口` 打开空控制台。控制台同机选 `2 安装节点` 即可接入；其他机器用菜单 `13` 生成的一次性命令安装，无需编译、手写 JSON 或复制凭据包。支持 Linux amd64、arm64。
 
 ![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-amd64%20%7C%20arm64-333333?logo=linux&logoColor=white)
@@ -95,37 +95,45 @@ bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/in
 
 已有 `/etc/netshare/controller.json` 时，安装保留原监听、访问地址、密码、证书和映射，不重新问端口或生成 CA。
 
-### 2. 添加节点，生成配对包
+### 2. 安装控制台所在机器的节点
 
-在控制台服务器运行 `sudo netshare-manage`，选 `13 添加节点/生成安装包`，按提示填节点 ID、显示名称、公网 IP、私网 IP、公网网卡和私网网卡。网卡用 `ip -br addr`、`ip -4 route get 对端私网IP` 核实，不要照抄别人的 `eth0`、`eth1`。
+控制台安装完成后，在同一台机器运行 `sudo netshare-manage`，选 `2 安装节点`。向导会读取本机控制台和 CA，自动登记并安装本机节点；已登记的本机节点会复用现有身份，不重复添加。
 
-控制台会复用原 CA，为当前所有节点生成各自的配对包，保存到：
+能够确定的 IP 和网卡自动使用，多个候选或缺少私网信息时才询问。先用 `ip -br addr`、`ip -4 route get 对端私网IP` 核实地址与路由。没有配好的私网地址时，先在云平台和 Linux 内配通再继续；向导不会伪造网卡或恢复已关闭的私网。
 
-```text
-/var/lib/netshare-bootstrap/pairings/<时间与随机标识>/netshare-node-<节点ID>.tar.gz
+### 3. 接入其他机器
+
+在控制台服务器运行 `sudo netshare-manage`，选 `13` 添加远端节点。按提示填这台远端机器的 ID、名称、公网 IP、私网 IP、公网网卡和私网网卡；本机探测值不能当作远端信息。
+
+控制台复用原 CA，生成对应节点的一次性安装命令。远端直接运行菜单 `2` 时，可以粘贴接入码；空输入或选择返回会先退出，不先装依赖或下载。把终端给出的完整命令复制到对应节点执行，安装器会自动领取并导入它自己的配置与叶子证书。命令形式如下，接入串必须用控制台实际生成的值：
+
+```bash
+bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh) install agent --join '控制台生成的完整URL#KEY'
 ```
 
-目录为 `0700`、包为 `0600`。每个包只包含该节点的配置和叶子证书，不含 CA 主私钥或管理员密码。通过可信 SSH 把对应包传到对应节点，包括与控制台同机运行的节点。
+命令默认 15 分钟有效，首次领取后失效，包含的接入凭据要当密码保管。领取失败、用错接入串、已经使用或过期时，回到控制台菜单 `14` 为对应节点重新生成。若已领取成功、后续安装检查失败，终端会给出受限保存的安装包路径，可用 `--pairing` 重试，无需再领取。
 
-添加新节点后，**已安装节点也要导入本轮为它生成的新包**。代理的目标白名单需要包含新增的私网 IP；只装新节点会让旧节点拒绝转发到它。按节点 ID 分发，不能把 A 的包用于 B。
+### 4. 更新已有节点
 
-### 3. 在每台节点导入
+添加新节点后，终端也会提供已有节点各自的更新命令。按节点逐台执行，让原代理的目标白名单包含新节点私网 IP；仅安装新节点可能造成单向不通。控制台同机的旧代理也要更新，可以再次选 `2` 就地导入当前配置；其他节点执行各自的更新命令。
 
-每台节点运行开头的 Bash，选 `2 安装节点`，填写自己那份配对包路径。已安装的机器可直接运行 `sudo netshare-manage`。脚本保留代理状态和已有映射，只更新对应配置与凭据；节点 ID 或 CA 不匹配的包会被拒绝。
+更新保留代理状态和已有映射，只更换对应配置与叶子凭据。已有节点的 ID 或 CA 不匹配会被拒绝，不能互换 A、B 的命令或安装包。全部完成后，在控制台确认在线，再创建映射。
 
-也可使用命令：
+顶部命令需要 `curl`；在 Debian / Ubuntu 上，安装器会自动补齐 Python 3 及节点需要的 `nftables`、`iproute2`。其他发行版先自行安装 Python 3、`nft`、`ip`、`ss`。没有控制台资料或接入凭据时，向导先说明下一步，不会先安装依赖或下载发行包。
+
+## 高级手动部署
+
+下面用于离线部署、批量清单初始化或自行管理 CA 的场景。普通安装使用前面的一键流程即可；需要 HTTPS 也可在已有安装上自行反代。
+
+### 离线配对包
+
+无法从节点访问控制台时，也可手动传输控制台生成的对应配对包，再执行：
 
 ```bash
 sudo netshare-manage install agent --pairing /root/netshare-node-edge-a.tar.gz
 ```
 
-没有 `netshare-manage` 的新主机先运行顶部安装入口。顶部命令需要 `curl`；在 Debian / Ubuntu 上，安装器会自动补齐 Python 3 及节点需要的 `nftables`、`iproute2`。其他发行版先自行安装 Python 3、`nft`、`ip`、`ss`。
-
-所有节点导入完成后，在控制台确认在线，再创建映射。两节点至少要能通过私网互通；安装和配对不会开通云私网、修改网卡或恢复已经关闭的私网。
-
-## 高级手动部署
-
-下面用于离线部署、批量清单初始化或自行管理 CA 的场景。普通安装使用前面的一键流程即可；需要 HTTPS 也可在已有安装上自行反代。
+配对包只含该节点配置和叶子凭据，不含 CA 主私钥或管理员密码。每台节点只接收自己的包；旧节点需要更新目标白名单时也要导入本轮对应包。
 
 ### 构建与初始化
 
@@ -322,7 +330,7 @@ npm --prefix frontend ci
 npm --prefix frontend run build
 go test -race ./...
 go vet ./...
-VERSION=v1.2.1 bash ./build.sh
+VERSION=v1.2.2 bash ./build.sh
 ```
 
 `build.sh` 会按锁文件安装并重建前端，将全部静态资源编译进 Go 程序；先编译前端再运行 Go 测试，才能验证本次的真实资源。前端源文件变更后不要只运行 `go build`，否则会带上旧的静态页面。

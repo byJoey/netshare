@@ -30,15 +30,25 @@ type nodeOptions struct {
 	dir           string
 	node          model.Node
 	agentPort     int
+	exportOnly    bool
 }
 
 // NodeCommand 只导出配对候选，不修改运行中的配置或映射状态。
 func NodeCommand(args []string) error {
-	if len(args) == 0 || args[0] != "add" {
+	if len(args) > 0 {
+		switch args[0] {
+		case "invite":
+			return inviteCommand(args[1:])
+		case "fetch":
+			return fetchCommand(args[1:])
+		}
+	}
+	if len(args) == 0 || (args[0] != "add" && args[0] != "export") {
 		return fmt.Errorf("用法：netshare node add --config 配置 --authority CA目录 --id 节点ID --name 名称 --public-ip 公网IP --private-ip 私网IP --public-interface 公网网卡 --private-interface 私网网卡 --dir 新目录")
 	}
-	fs := flag.NewFlagSet("netshare node add", flag.ContinueOnError)
+	fs := flag.NewFlagSet("netshare node "+args[0], flag.ContinueOnError)
 	var opt nodeOptions
+	opt.exportOnly = args[0] == "export"
 	fs.StringVar(&opt.configPath, "config", "", "现有控制台配置")
 	fs.StringVar(&opt.authorityDir, "authority", "", "仅管理员可读的原 CA 目录")
 	fs.StringVar(&opt.credentialDir, "credential-dir", "", "显式指定现有控制台叶子目录；默认使用配置中的路径")
@@ -54,7 +64,7 @@ func NodeCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("node add 不接受位置参数")
+		return fmt.Errorf("node %s 不接受位置参数", args[0])
 	}
 	if err := addNode(opt); err != nil {
 		return err
@@ -68,16 +78,6 @@ func addNode(opt nodeOptions) error {
 	if opt.configPath == "" || opt.authorityDir == "" || opt.dir == "" {
 		return fmt.Errorf("请提供 --config、--authority 和 --dir")
 	}
-	if opt.agentPort < 1 || opt.agentPort > 65535 || opt.agentPort == 22 {
-		return fmt.Errorf("代理端口必须为 1–65535 且不能使用 SSH 22")
-	}
-	opt.node.Name = strings.TrimSpace(opt.node.Name)
-	if err := model.ValidateNode(opt.node); err != nil {
-		return err
-	}
-	if len([]rune(opt.node.Name)) > 80 {
-		return fmt.Errorf("机器名称最多 80 个字符")
-	}
 	if err := rejectSymlinkPath(opt.configPath); err != nil {
 		return err
 	}
@@ -85,18 +85,34 @@ func addNode(opt nodeOptions) error {
 	if err != nil {
 		return err
 	}
-	if len(cfg.Nodes) >= maxNodes {
-		return fmt.Errorf("最多配置 %d 台机器", maxNodes)
-	}
-	for _, old := range cfg.Nodes {
-		if old.ID == opt.node.ID || old.PublicIP == opt.node.PublicIP || old.PrivateIP == opt.node.PrivateIP {
-			return fmt.Errorf("新节点的 ID、公网或私网 IP 与现有节点重复")
+	if opt.exportOnly {
+		if len(cfg.Nodes) == 0 {
+			return fmt.Errorf("暂无可导出的节点，请先添加节点")
 		}
+	} else {
+		if opt.agentPort < 1 || opt.agentPort > 65535 || opt.agentPort == 22 {
+			return fmt.Errorf("代理端口必须为 1–65535 且不能使用 SSH 22")
+		}
+		opt.node.Name = strings.TrimSpace(opt.node.Name)
+		if err := model.ValidateNode(opt.node); err != nil {
+			return err
+		}
+		if len([]rune(opt.node.Name)) > 80 {
+			return fmt.Errorf("机器名称最多 80 个字符")
+		}
+		if len(cfg.Nodes) >= maxNodes {
+			return fmt.Errorf("最多配置 %d 台机器", maxNodes)
+		}
+		for _, old := range cfg.Nodes {
+			if old.ID == opt.node.ID || old.PublicIP == opt.node.PublicIP || old.PrivateIP == opt.node.PrivateIP {
+				return fmt.Errorf("新节点的 ID、公网或私网 IP 与现有节点重复")
+			}
+		}
+		opt.node.AgentURL = "https://" + net.JoinHostPort(opt.node.PrivateIP, strconv.Itoa(opt.agentPort))
+		opt.node.ReservedPorts = []int{22, opt.agentPort}
+		sort.Ints(opt.node.ReservedPorts)
+		cfg.Nodes = append(cfg.Nodes, opt.node)
 	}
-	opt.node.AgentURL = "https://" + net.JoinHostPort(opt.node.PrivateIP, strconv.Itoa(opt.agentPort))
-	opt.node.ReservedPorts = []int{22, opt.agentPort}
-	sort.Ints(opt.node.ReservedPorts)
-	cfg.Nodes = append(cfg.Nodes, opt.node)
 
 	ca, err := readAuthority(opt.authorityDir)
 	if err != nil {
