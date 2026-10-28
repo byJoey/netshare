@@ -1,5 +1,11 @@
 # NetShare
 
+```bash
+bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh)
+```
+
+在 Linux 服务器上运行后进入中文交互菜单，按提示安装、升级或卸载。脚本自动下载 [最新发行版](https://github.com/byJoey/netshare/releases/latest) 并校验 SHA256，支持 amd64、arm64。私网与配对凭据需先准备，完整步骤见下文。
+
 ![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-amd64%20%7C%20arm64-333333?logo=linux&logoColor=white)
 ![MIT](https://img.shields.io/badge/License-MIT-blue)
@@ -62,7 +68,7 @@ ss -lntup
 
 ## 构建与初始化
 
-需要 Go 1.26 或更新版本。
+已下载发行包的用户可跳过源码构建，直接运行解压目录里的 `./netshare init` 准备凭据。只有从源码编译时需要 Go 1.26 或更新版本；重建界面另需 Node.js 22.12+。
 
 ```bash
 go mod download

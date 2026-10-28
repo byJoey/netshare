@@ -4,7 +4,6 @@ umask 077
 
 # NetShare 运维入口；只管理本项目的文件、服务和独立 nftables 表。
 SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
-SCRIPT_DIR="$(dirname -- "$SCRIPT_PATH")"
 ROOT_PREFIX=""
 TEST_MODE=false
 TX_DIR=""
@@ -22,6 +21,7 @@ PURGE=false
 NO_START=false
 LOG_LINES=100
 PACKAGE_DIR=""
+OFFICIAL_REPO="byJoey/netshare"
 
 say() { printf '%s\n' "$*"; }
 die() { printf '错误：%s\n' "$*" >&2; exit 1; }
@@ -31,15 +31,16 @@ NetShare 安装与管理
 
   bash manage.sh install controller --bundle /私密目录/controller [--source 发行目录或.tar.gz] [--no-start]
   bash manage.sh install agent --bundle /私密目录/agents/节点ID [--source 发行目录或.tar.gz] [--no-start]
-  netshare-manage upgrade controller|agent --source 发行目录或.tar.gz
+  netshare-manage upgrade controller|agent [--source 发行目录或.tar.gz]
   netshare-manage start|stop|restart|status|logs controller|agent
   netshare-manage entry
   netshare-manage path rotate
   netshare-manage backup controller|agent
   netshare-manage uninstall controller|agent [--purge]
 
+安装/升级不填 --source 时，自动下载本项目 GitHub 最新稳定 Release 并校验 SHA256。
 --source 也支持显式 HTTPS 地址，此时必须加 --sha256 64位校验和。
-本地压缩包若提供 --sha256 也会校验。安装默认从脚本所在发行目录读取。
+本地压缩包若提供 --sha256 也会校验；离线使用本目录时填 --source .。
 已有配置、证书和映射不会被安装/升级覆盖。卸载默认保留配置与状态；
 --purge 才删除该角色的数据，备份始终保留。脚本不安装/修改 Caddy 或云私网。
 不带参数时打开中文菜单；输入 help 查看本说明。
@@ -123,14 +124,52 @@ PY
 }
 ensure_private_dir() { assert_no_symlink "$1"; mkdir -p -- "$1"; python3 -c 'import os,sys;os.chmod(sys.argv[1],0o700)' "$1"; }
 
+download_https() {
+  command -v curl >/dev/null 2>&1 || die "下载需要 curl"
+  local url="$1" destination="$2" limit="$3"
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --connect-timeout 10 --max-time 300 --max-filesize "$limit" \
+    --output "$destination" "$url"
+}
+latest_official_release() {
+  say "正在查询 NetShare 官方最新稳定发行版…" >&2
+  download_https "https://api.github.com/repos/$OFFICIAL_REPO/releases/latest" "$TMP_DIR/release.json" 1048576 || die "查询官方 Release 失败，请稍后重试，或用 --source 指定已验证发行包"
+  local tag filename
+  tag="$(python3 - "$TMP_DIR/release.json" <<'PYCODE'
+import json,re,sys
+with open(sys.argv[1]) as f:value=json.load(f)
+tag=value.get('tag_name','')
+if value.get('draft') or value.get('prerelease') or not isinstance(tag,str) or len(tag)>64 or not re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)',tag):
+    raise SystemExit('官方最新发行不是受支持的稳定版本')
+print(tag)
+PYCODE
+)"
+  filename="netshare_${tag}_linux_${ARCH}.tar.gz"
+  download_https "https://github.com/$OFFICIAL_REPO/releases/download/$tag/SHA256SUMS" "$TMP_DIR/SHA256SUMS" 1048576 || die "下载官方校验表失败"
+  EXPECTED_SHA="$(python3 - "$TMP_DIR/SHA256SUMS" "$filename" <<'PYCODE'
+import pathlib,re,sys
+matches=[]
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    parts=line.split()
+    if len(parts)==2 and parts[1] in (sys.argv[2], '*'+sys.argv[2]):
+        if not re.fullmatch(r'[0-9a-fA-F]{64}',parts[0]):raise SystemExit('目标包校验和格式无效')
+        matches.append(parts[0].lower())
+if len(matches)!=1:raise SystemExit('校验表必须包含唯一且精确匹配的目标包记录')
+print(matches[0])
+PYCODE
+)"
+  SOURCE="https://github.com/$OFFICIAL_REPO/releases/download/$tag/$filename"
+  say "已选择官方发行版 ${tag}，架构 ${ARCH}；下载后会校验 SHA256。" >&2
+}
+
 # 归档只解到本次 mktemp 目录，不接受链接、设备或穿越路径。
 prepare_package() {
-  local supplied="${SOURCE:-$SCRIPT_DIR}" archive=""
+  if [[ -z "$SOURCE" ]]; then latest_official_release; fi
+  local supplied="$SOURCE" archive=""
   if [[ "$supplied" == https://* ]]; then
     [[ "$EXPECTED_SHA" =~ ^[a-fA-F0-9]{64}$ ]] || die "远程包必须提供 --sha256"
-    command -v curl >/dev/null 2>&1 || die "下载需要 curl"
     archive="$TMP_DIR/release.tar.gz"
-    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 300 --output "$archive" "$supplied" || die "下载失败"
+    download_https "$supplied" "$archive" 157286400 || die "下载失败"
   elif [[ "$supplied" == *://* ]]; then
     die "下载地址只允许 HTTPS"
   elif [[ -d "$supplied" && ! -L "$supplied" ]]; then
@@ -410,7 +449,7 @@ install_role() {
   local cfg service existing=false
   cfg="$(config_for "$ROLE")";service="$(unit_for "$ROLE")"
   if [[ -f "$cfg" ]]; then existing=true; else validate_bundle; fi
-  if [[ "$ROLE" == agent ]]; then for tool in nft ip ss; do command -v "$tool" >/dev/null || die "节点缺少依赖：$tool（Ubuntu：apt-get install nftables iproute2）"; done; fi
+  if [[ "$ROLE" == agent ]]; then for tool in nft ip ss; do command -v "$tool" >/dev/null || die "节点缺少依赖：${tool}（Ubuntu：apt-get install nftables iproute2）"; done; fi
   lock_mutation;snapshot_begin "$ROLE"
   atomic_copy "$PACKAGE_DIR/netshare" "$(path_for /usr/local/bin/netshare)" 0755
   atomic_copy "$PACKAGE_DIR/manage.sh" "$(path_for /usr/local/sbin/netshare-manage)" 0755
@@ -420,13 +459,12 @@ install_role() {
   systemctl daemon-reload
   if ! $NO_START; then systemctl enable "$service";systemctl start "$service";service_health; fi
   TX_STARTED=false
-  say "安装完成：$ROLE。配置和映射已保留；备份：$TX_DIR"
+  say "安装完成：${ROLE}。配置和映射已保留；备份：$TX_DIR"
   if $NO_START; then say "服务尚未启动。"; fi
   if [[ "$ROLE" == controller ]]; then say "使用 netshare-manage entry 查看管理入口。HTTPS 请按 deploy/Caddyfile 配置；脚本不会覆盖已有站点。"; fi
 }
 upgrade_role() {
   role_check "$ROLE";[[ -f "$(config_for "$ROLE")" ]] || die "该角色未安装"
-  [[ -n "$SOURCE" ]] || die "升级必须显式给出 --source"
   prepare_package;lock_mutation;snapshot_begin "$ROLE"
   local service
   service="$(unit_for "$ROLE")"
@@ -435,7 +473,7 @@ upgrade_role() {
   if [[ "$ROLE" == controller ]]; then ensure_random_path; fi
   if $TX_ACTIVE; then systemctl start "$service";service_health; fi
   TX_STARTED=false
-  say "升级完成：$ROLE。原启停状态已保留；备份：$TX_DIR"
+  say "升级完成：${ROLE}。原启停状态已保留；备份：$TX_DIR"
   say "控制器与节点共用程序文件，另一角色的运行进程保持原样；需要更新其进程时单独重启该角色。"
 }
 rotate_path() {
@@ -486,28 +524,93 @@ PY
   if [[ ! -f "$(path_for "/etc/systemd/system/$other.service")" ]] && ! systemctl is-active --quiet "$other"; then rm -f -- "$(path_for /usr/local/bin/netshare)"; fi
   # 保留管理脚本，便于查看备份和重新安装；不删除系统用户或 Caddy 站点。
   TX_STARTED=false
-  say "卸载完成：$ROLE。备份：$TX_DIR"
+  say "卸载完成：${ROLE}。备份：$TX_DIR"
   if ! $PURGE; then say "配置、证书和映射状态已保留，可直接重新安装。"; fi
   if [[ "$ROLE" == agent ]]; then say "只移除了 NetShare 独立规则表；未重置全局 ip_forward，也未清空连接跟踪。"; fi
 }
 
-menu() {
-  [[ -t 0 ]] || { usage;exit 0; }
-  say 'NetShare 管理';say '1 安装控制台  2 安装节点  3 升级  4 查看状态  5 查看日志'
-  say '6 启动  7 停止  8 重启  9 查看入口  10 更换入口  11 备份  12 卸载  0 退出'
-  local choice action role bundle source
-  read -r -p '选择：' choice
-  case "$choice" in
-    0) exit 0 ;; 9) main entry;return ;; 10) main path rotate;return ;;
-    1|2) if [[ "$choice" == 1 ]];then role=controller;else role=agent;fi
-      read -r -p '对应叶子凭据目录：' bundle;read -r -p '发行目录或tar.gz（回车使用脚本目录）：' source
-      main install "$role" --bundle "$bundle" --source "${source:-$SCRIPT_DIR}";return ;;
-    3) read -r -p '角色 controller/agent：' role;read -r -p '发行目录或tar.gz：' source;main upgrade "$role" --source "$source";return ;;
-    4) action=status ;;5)action=logs;;6)action=start;;7)action=stop;;8)action=restart;;11)action=backup;;12)action=uninstall;;*)die '无效选择';;
-  esac
-  read -r -p '角色 controller/agent：' role
-  main "$action" "$role"
+menu_role() {
+  local choice
+  while :; do
+    say '选择角色：1 控制台  2 节点  0 返回'
+    read -r -p '角色 [1/2]：' choice || return 1
+    case "$choice" in 1|controller) MENU_ROLE=controller;return 0;;2|agent)MENU_ROLE=agent;return 0;;0)return 1;;*)say '请输入 1 或 2。';;esac
+  done
 }
+menu_action() {
+  # 独立进程保留严格错误与事务回退；操作失败不会让菜单进程退出。
+  local result
+  if bash "$SCRIPT_PATH" "$@"; then result=0;say '操作完成。';else result=$?;say "本次操作未完成（退出码 ${result}），可以继续选择其他操作。";fi
+}
+menu() {
+  [[ -t 0 ]] || { usage;return 0; }
+  local choice action bundle source purge_choice response
+  local -a args
+  while :; do
+    say '';say 'NetShare 管理'
+    say '1 安装控制台  2 安装节点  3 升级  4 查看状态  5 查看日志'
+    say '6 启动  7 停止  8 重启  9 查看入口  10 更换入口  11 备份  12 卸载  0 退出'
+    read -r -p '选择：' choice || break
+    args=()
+    case "$choice" in
+      0)break;;
+      1|2)
+        if [[ "$choice" == 1 ]];then MENU_ROLE=controller;else MENU_ROLE=agent;fi
+        say "安装角色：${MENU_ROLE}。凭据应为这个角色对应的叶子目录，不能使用 authority。"
+        read -r -p '叶子凭据目录（已安装可留空保留现有配置，0 返回）：' bundle || break
+        [[ "$bundle" == 0 ]] && continue
+        read -r -p '发行来源（回车下载官方最新 Release；也可填本地目录/tar.gz）：' source || break
+        args=(install "$MENU_ROLE")
+        [[ -n "$bundle" ]] && args+=(--bundle "$bundle")
+        [[ -n "$source" ]] && args+=(--source "$source")
+        if [[ "$source" == https://* ]];then read -r -p '此自定义 HTTPS 包的 SHA256：' response || break;args+=(--sha256 "$response");fi
+        ;;
+      3)
+        menu_role || continue
+        read -r -p '发行来源（回车下载官方最新 Release；也可填本地目录/tar.gz）：' source || break
+        args=(upgrade "$MENU_ROLE")
+        [[ -n "$source" ]] && args+=(--source "$source")
+        if [[ "$source" == https://* ]];then read -r -p '此自定义 HTTPS 包的 SHA256：' response || break;args+=(--sha256 "$response");fi
+        ;;
+      9)args=(entry);;
+      10)
+        say '将更换控制台入口，旧书签会失效；登录密码、映射与私网保持原样。'
+        read -r -p '确认更换？[y/N]：' response || break
+        [[ "$response" == y || "$response" == Y ]] || continue
+        args=(path rotate)
+        ;;
+      4|5|6|7|8|11|12)
+        menu_role || continue
+        case "$choice" in 4)action=status;;5)action=logs;;6)action=start;;7)action=stop;;8)action=restart;;11)action=backup;;12)action=uninstall;;esac
+        args=("$action" "$MENU_ROLE")
+        if [[ "$choice" == 7 ]];then
+          read -r -p "确认停止 $MENU_ROLE 服务？[y/N]：" response || break
+          [[ "$response" == y || "$response" == Y ]] || continue
+        fi
+        if [[ "$choice" == 12 ]];then
+          say '1 保留配置、证书和映射状态（默认）  2 彻底清理该角色数据  0 返回'
+          read -r -p '卸载方式 [1]：' purge_choice || break
+          case "$purge_choice" in ''|1) ;;2)args+=(--purge);;0)continue;;*)say '无效选择，未卸载。';continue;;esac
+          say "将停止并卸载 ${MENU_ROLE}；节点卸载还会移除本工具的映射规则表，备份保留。"
+          if [[ "$purge_choice" == 2 ]];then
+            read -r -p '确认彻底清理？输入 PURGE：' response || break
+            [[ "$response" == PURGE ]] || continue
+            # 非终端输入避免卸载子进程重复询问；本菜单已经明确确认。
+            if bash "$SCRIPT_PATH" "${args[@]}" </dev/null;then say '操作完成。';else say '本次卸载未完成，可继续选择其他操作。';fi
+            continue
+          else
+            read -r -p '确认卸载并保留配置？[y/N]：' response || break
+            [[ "$response" == y || "$response" == Y ]] || continue
+          fi
+        fi
+        ;;
+      *)say '无效选择，请重新输入。';continue;;
+    esac
+    menu_action "${args[@]}"
+  done
+  say '已退出 NetShare 管理。'
+}
+
 main() {
   local command="${1:-menu}"
   if [[ "$command" == help || "$command" == --help || "$command" == -h ]];then usage;return;fi

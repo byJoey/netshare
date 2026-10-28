@@ -50,6 +50,21 @@ func TestUIAcceptanceServer(t *testing.T) {
 	c.cfg.Listen = "127.0.0.1:19111"
 	c.cfg.ExternalURL = "http://127.0.0.1:19111"
 	c.cfg.CookieSecure = false
+	if os.Getenv("NETSHARE_UI_ACCEPTANCE_DEMO") == "1" {
+		// 博客配图仅用文档地址与内存代理，不能当作真实网络实测。
+		c.cfg.Nodes[0].Name = "演示节点 A"
+		c.cfg.Nodes[1].Name = "演示节点 B"
+		c.cfg.Nodes[0].ReservedPorts = []int{22, 80, 443, 31880}
+		c.cfg.Nodes[1].ReservedPorts = []int{22, 31880}
+		now := time.Now().UTC()
+		mappings := []model.Mapping{
+			{ID: "demo-web-entry", Name: "演示：Web 备用入口", SourceNode: "a", TargetNode: "b", Protocol: "both", ListenPort: "18080", TargetPort: "8080", Enabled: true, CreatedAt: now, UpdatedAt: now},
+			{ID: "demo-monitor-entry", Name: "演示：监控面板", SourceNode: "b", TargetNode: "a", Protocol: "tcp", ListenPort: "19090", TargetPort: "9090", Enabled: true, CreatedAt: now, UpdatedAt: now},
+		}
+		if err = c.commitMappings(context.Background(), mappings, "演示初始化", "仅供本机界面演示，不连接真实网络"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if os.Getenv("NETSHARE_UI_ACCEPTANCE_RANDOM_PATH") == "1" {
 		c.cfg.AccessPath, err = model.NewAccessPath()
 		if err != nil {

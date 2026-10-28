@@ -4,6 +4,10 @@ import hashlib
 import http.server
 import json
 import os
+import errno
+import pty
+import select
+import time
 from pathlib import Path
 import shutil
 import stat
@@ -76,6 +80,21 @@ if a==['delete','table','ip','netshare']:
  p.unlink(missing_ok=True);raise SystemExit(0)
 if len(a)==2 and a[0]=='-f':p.write_text(pathlib.Path(a[1]).read_text());raise SystemExit(0)
 raise SystemExit('不允许触碰其他规则表')
+'''
+
+
+CURL = r'''#!/usr/bin/env python3
+import json,os,pathlib,shutil,sys
+r=pathlib.Path(os.environ['NETSHARE_TEST_ROOT']);a=sys.argv[1:];url=a[-1]
+with (r/'downloads.log').open('a') as f:f.write(url+'\n')
+if '--proto' not in a or a[a.index('--proto')+1]!='=https' or '--proto-redir' not in a or a[a.index('--proto-redir')+1]!='=https':raise SystemExit('下载没有HTTPS限制')
+dest=pathlib.Path(a[a.index('--output')+1]);cfg=json.loads((r/'release-fixture.json').read_text())
+base='https://github.com/byJoey/netshare/releases/download/'+cfg['tag']+'/'
+if url=='https://api.github.com/repos/byJoey/netshare/releases/latest':src=cfg['metadata']
+elif url==base+'SHA256SUMS':src=cfg['sums']
+elif url==base+cfg['filename']:src=cfg['archive']
+else:raise SystemExit('意外的下载目标')
+shutil.copyfile(src,dest)
 '''
 
 
@@ -159,6 +178,7 @@ class Lifecycle(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("unbound variable", result.stderr, "脚本出现未绑定变量错误")
         self.assertFalse((self.root / "run/netshare-manage/lock").exists(), "锁未释放")
         return result
 
@@ -173,6 +193,103 @@ class Lifecycle(unittest.TestCase):
 
     def commands(self):
         return (self.root / "commands.log").read_text().splitlines()
+
+    def release_fixture(self, *, bad_sum=False, tag="v1.2.0", duplicate=False):
+        import platform
+        arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "amd64"
+        filename = f"netshare_v1.2.0_linux_{arch}.tar.gz"
+        archive = self.base / filename
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(self.package, arcname="netshare_v1.2.0_linux_" + arch)
+        digest = "0" * 64 if bad_sum else hashlib.sha256(archive.read_bytes()).hexdigest()
+        metadata = self.base / "release.json"
+        metadata.write_text(json.dumps({"tag_name": tag, "draft": False, "prerelease": False}))
+        sums = self.base / "SHA256SUMS"
+        line = digest + "  " + filename + "\n"
+        sums.write_text(line + (line if duplicate else "") + "1" * 64 + "  manage.sh\n")
+        config = {"tag": tag, "filename": filename, "archive": str(archive), "metadata": str(metadata), "sums": str(sums)}
+        (self.root / "release-fixture.json").write_text(json.dumps(config))
+        self.write_exec(self.tools / "curl", CURL)
+        return config
+
+    def run_menu(self, input_text):
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(["bash", str(MANAGER)], env=self.env, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+        os.close(slave)
+        output = bytearray()
+        try:
+            os.write(master, input_text.encode())
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], .2)
+                if ready:
+                    try:
+                        value = os.read(master, 65536)
+                    except OSError as error:
+                        if error.errno == errno.EIO:
+                            break
+                        raise
+                    if not value:
+                        break
+                    output.extend(value)
+                elif proc.poll() is not None:
+                    break
+            else:
+                proc.kill()
+                self.fail("交互菜单未按输入退出")
+            self.assertEqual(proc.wait(timeout=5), 0, output.decode(errors="replace"))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            os.close(master)
+        self.assertFalse((self.root / "run/netshare-manage/lock").exists())
+        text = output.decode(errors="replace")
+        self.assertNotIn("unbound variable", text)
+        return text
+
+    def test_default_official_release_download_and_exact_checksum(self):
+        config = self.release_fixture()
+        self.run_manager("install", "controller", "--bundle", self.controller_bundle)
+        self.assertTrue(self.service("netshare")["active"])
+        urls = (self.root / "downloads.log").read_text().splitlines()
+        self.assertEqual(urls, ["https://api.github.com/repos/byJoey/netshare/releases/latest", "https://github.com/byJoey/netshare/releases/download/v1.2.0/SHA256SUMS", "https://github.com/byJoey/netshare/releases/download/v1.2.0/" + config["filename"]])
+        before = len(urls)
+        self.run_manager("upgrade", "controller")
+        self.assertEqual(len((self.root / "downloads.log").read_text().splitlines()), before + 3)
+
+    def test_official_release_rejects_bad_tag_checksum_and_duplicate(self):
+        for options in ({"tag": "v1.2.0/evil"}, {"bad_sum": True}, {"duplicate": True}):
+            with self.subTest(options=options):
+                self.release_fixture(**options)
+                self.run_manager("install", "controller", "--bundle", self.controller_bundle, ok=False)
+                self.assertFalse((self.root / "usr/local/bin/netshare").exists())
+                self.assertFalse((self.root / "etc/netshare").exists())
+
+    def test_menu_loops_after_failure_and_install_defaults_release(self):
+        self.release_fixture()
+        text = self.run_menu("99\n9\n1\n" + str(self.controller_bundle) + "\n\n3\n1\n\n4\n1\n0\n")
+        self.assertIn("无效选择", text)
+        self.assertIn("本次操作未完成", text)
+        self.assertIn("安装完成：controller", text)
+        self.assertIn("升级完成：controller", text)
+        self.assertEqual(len((self.root / "downloads.log").read_text().splitlines()), 6)
+        self.assertGreaterEqual(text.count("NetShare 管理"), 4)
+        self.assertTrue(self.service("netshare")["active"])
+        self.assertTrue((self.root / "downloads.log").exists())
+
+    def test_menu_uninstall_defaults_keep_and_explicit_purge(self):
+        self.install("controller")
+        keep = self.run_menu("12\n1\n\ny\n0\n")
+        self.assertIn("配置、证书和映射状态已保留", keep)
+        self.assertTrue((self.root / "etc/netshare/controller.json").exists())
+        self.run_manager("install", "controller", "--source", self.package)
+        cancel = self.run_menu("12\n1\n2\nNO\n0\n")
+        self.assertNotIn("卸载完成", cancel)
+        self.assertTrue((self.root / "etc/netshare/controller.json").exists())
+        purge = self.run_menu("12\n1\n2\nPURGE\n0\n")
+        self.assertIn("卸载完成", purge)
+        self.assertFalse((self.root / "etc/netshare").exists())
 
     def test_install_preserve_rotate_and_role_isolation(self):
         result = self.install("controller")

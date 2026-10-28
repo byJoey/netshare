@@ -20,15 +20,16 @@ for BUILD_ARCH in amd64 arm64; do
   mkdir -p -- "$BUILD_TMP/$BUILD_NAME"
   CGO_ENABLED=0 GOOS=linux GOARCH="$BUILD_ARCH" go build -trimpath -buildvcs=false -ldflags="-s -w -X netshare/internal/model.Version=${BUILD_VERSION#v}" -o "$BUILD_TMP/$BUILD_NAME/netshare" .
   cp -- README.md LICENSE "$BUILD_TMP/$BUILD_NAME/"
-  cp -- manage.sh "$BUILD_TMP/$BUILD_NAME/"
+  cp -- manage.sh install.sh "$BUILD_TMP/$BUILD_NAME/"
   cp -R -- frontend/licenses "$BUILD_TMP/$BUILD_NAME/"
   cp -R -- deploy "$BUILD_TMP/$BUILD_NAME/"
   tar -C "$BUILD_TMP" -czf "$BUILD_ROOT/dist/$BUILD_NAME.tar.gz" "$BUILD_NAME"
 done
 cd -- "$BUILD_ROOT/dist"
+cp -- "$BUILD_ROOT/manage.sh" "$BUILD_ROOT/install.sh" .
 if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum "netshare_${BUILD_VERSION}_linux_amd64.tar.gz" "netshare_${BUILD_VERSION}_linux_arm64.tar.gz" > SHA256SUMS
+  sha256sum "netshare_${BUILD_VERSION}_linux_amd64.tar.gz" "netshare_${BUILD_VERSION}_linux_arm64.tar.gz" manage.sh install.sh > SHA256SUMS
 else
-  shasum -a 256 "netshare_${BUILD_VERSION}_linux_amd64.tar.gz" "netshare_${BUILD_VERSION}_linux_arm64.tar.gz" > SHA256SUMS
+  shasum -a 256 "netshare_${BUILD_VERSION}_linux_amd64.tar.gz" "netshare_${BUILD_VERSION}_linux_arm64.tar.gz" manage.sh install.sh > SHA256SUMS
 fi
 echo "已生成 dist/ 下的 Linux amd64、arm64 包与 SHA256SUMS。"

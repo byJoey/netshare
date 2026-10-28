@@ -1,4 +1,10 @@
+```bash
+bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh)
+```
+
 # NetShare 安装与管理脚本
+
+这条命令打开交互管理菜单。按提示选择控制台或节点、填写对应的叶子凭据目录；发行来源直接回车，会下载本项目 GitHub 最新稳定 Release，自动识别 CPU 架构并核对包的 SHA256。
 
 适用于使用 systemd 的 Linux amd64、arm64 主机。推荐 Ubuntu 24.04。安装脚本需要 root、Bash、Python 3、systemd 和常见系统工具；节点另外需要 `nft`、`ip`、`ss`。Ubuntu 可安装依赖：
 
@@ -13,7 +19,9 @@ apt-get install -y python3 nftables iproute2
 
 ## 安装
 
-下载与你的服务器架构匹配的发行包，先核对 `SHA256SUMS`，再解压。没有默认下载站，也不会从私人域名自动拉程序。
+推荐先用上面的 Bash 命令，进入菜单后选 `1 安装控制台` 或 `2 安装节点`。按提示填对应的叶子凭据目录，发行来源回车即可。已有配置会被保留，无需重新填写凭据；新主机需要先按 README 准备好叶子凭据。
+
+也可在 [GitHub Releases](https://github.com/byJoey/netshare/releases) 下载与你的架构匹配的包，核对 `SHA256SUMS` 后解压，运行 `sudo bash ./manage.sh`。菜单中的来源留空仍会选择官方最新稳定版；离线使用已解压目录时填写 `.`。
 
 | `uname -m` | 文件 |
 | --- | --- |
@@ -26,13 +34,13 @@ apt-get install -y python3 nftables iproute2
 
 ```bash
 cd netshare_v版本_linux_对应架构
-sudo bash ./manage.sh install agent --bundle /私密目录/agents/edge-a
+sudo bash ./manage.sh install agent --bundle /私密目录/agents/edge-a --source .
 ```
 
 节点代理都在线后，在控制台主机上：
 
 ```bash
-sudo bash ./manage.sh install controller --bundle /私密目录/controller
+sudo bash ./manage.sh install controller --bundle /私密目录/controller --source .
 ```
 
 安装会生成或保留随机管理路径，并将管理脚本放到 `/usr/local/sbin/netshare-manage`。初装旧配置没有随机路径时会自动生成；已有随机路径保持不变。若只准备文件、暂不启动，增加 `--no-start`。
@@ -46,7 +54,7 @@ HTTPS 仍由自己的 Caddy、Nginx 等反向代理提供。转发整个站点�
 ## 日常管理
 
 ```bash
-sudo netshare-manage                 # 中文菜单
+sudo netshare-manage                 # 循环中文菜单，操作失败也可继续选择
 sudo netshare-manage status controller
 sudo netshare-manage logs controller --lines 100
 sudo netshare-manage start controller
@@ -74,7 +82,15 @@ sudo netshare-manage entry
 
 ## 升级
 
-升级必须显式指定来源。推荐已解压发行目录：
+在菜单选择 `3 升级`，再选控制台或节点。发行来源直接回车即从本项目 GitHub 最新稳定 Release 下载对应 CPU 包和 `SHA256SUMS`，精确匹配目标文件名并校验。无须填写下载链接，也不需要 GitHub token。
+
+保留非交互命令，省略来源时同样使用官方最新稳定版：
+
+```bash
+sudo netshare-manage upgrade controller
+```
+
+离线或指定版本时，可显式选择已解压发行目录：
 
 ```bash
 sudo netshare-manage upgrade controller --source /opt/netshare_v新版本_linux_amd64
@@ -117,6 +133,10 @@ sudo netshare-manage backup agent
 
 ## 卸载
 
+菜单选 `12 卸载`，选择角色后默认保留数据。选择“彻底清理”还需输入 `PURGE`；取消确认不会卸载。操作完成或失败都会返回菜单。停止服务、更换入口也会先明确确认。
+
+非交互用法：
+
 ```bash
 sudo netshare-manage uninstall agent
 sudo netshare-manage uninstall controller
@@ -140,4 +160,4 @@ bash -n manage.sh
 python3 scripts/manage_test.py
 ```
 
-测试只使用带 `.netshare-test-root` 哨兵的临时沙箱和模拟 systemd/nft 命令，执行真实安装文件操作、角色隔离、轮换顺序、最后保存变更保护、失败回退、默认卸载、清理和归档拒绝验证。它不连接生产，不修改真实服务、防火墙或网卡。测试根目录仅配合显式测试模式生效，正常管理始终使用标准系统路径。
+测试只使用带 `.netshare-test-root` 哨兵的临时沙箱和模拟 systemd/nft/curl 命令。除真实安装文件操作、角色隔离、轮换与回退外，还通过 PTY 验证菜单循环、失败返回、卸载确认，以及官方 Release 下载路径、稳定版本过滤和精确校验和拒绝。它不连接生产，不修改真实服务、防火墙或网卡。测试根目录仅配合显式测试模式生效，正常管理始终使用标准系统路径。
