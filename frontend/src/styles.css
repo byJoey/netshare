@@ -2391,3 +2391,10 @@ main {
     scroll-behavior: auto !important;
   }
 }
+
+.join-command { width:100%; min-height:132px; resize:vertical; padding:14px; margin:8px 0 12px; border:1px solid var(--border); border-radius:8px; background:var(--muted); color:var(--foreground); font-size:12px; line-height:1.65; overflow-wrap:anywhere; word-break:break-all; }
+.join-status { display:flex; align-items:flex-start; gap:8px; margin:20px 0 10px; font-size:14px; }
+.join-status svg { flex-shrink:0; margin-top:2px; }
+.join-success { text-align:center; padding:24px 8px; }
+.join-success > svg { color:var(--success); margin-bottom:10px; }
+.join-success h3 { margin-bottom:8px; }

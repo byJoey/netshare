@@ -63,6 +63,16 @@ func (a *remoteAgents) Status(ctx context.Context, n model.Node) (s model.AgentS
 	return
 }
 func (a *remoteAgents) Apply(ctx context.Context, n model.Node, r model.ApplyRequest) (s model.ApplyResult, e error) {
+	if r.AllowedTargets != nil {
+		status, err := a.Status(ctx, n)
+		if err != nil {
+			return s, err
+		}
+		// 老代理仍保持原白名单；升级后的代理会自动同步，无需重新分发安装包。
+		if !status.AutomaticTargets {
+			r.AllowedTargets = nil
+		}
+	}
 	e = a.request(ctx, n, "POST", "/v1/apply", r, &s)
 	return
 }

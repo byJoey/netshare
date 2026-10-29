@@ -1,3 +1,4 @@
+import { JoinNodeButton } from "../components/join-node";
 import { useEffect, useMemo, useState } from "react";
 import {
   flexRender,
@@ -214,6 +215,7 @@ export function MappingsPage({
   overview,
   busy,
   onCreate,
+  onJoined,
   onEdit,
   onReverse,
   onDelete,
@@ -227,6 +229,7 @@ export function MappingsPage({
   overview: Overview;
   busy: boolean;
   onCreate: () => void;
+  onJoined: () => void;
   onEdit: (mapping: Mapping) => void;
   onReverse: (mapping: Mapping) => void;
   onDelete: (mapping: Mapping) => void;
@@ -331,6 +334,7 @@ export function MappingsPage({
           <p>管理公网入口，让服务经私网互通。</p>
         </div>
         <div className="page-actions">
+          <JoinNodeButton onJoined={onJoined} disabled={busy || overview.nodes.length >= 32} />
           <Button
             id="export"
             variant="outline"
@@ -416,7 +420,7 @@ export function MappingsPage({
             </div>
           ))}
           {overview.nodes.length === 0 && (
-            <p className="muted">尚未接入机器，请先配置节点代理。</p>
+            <p className="muted">先点“接入节点”，在每台服务器执行生成的命令。接入两台后就能创建映射。</p>
           )}
         </div>
       </section>

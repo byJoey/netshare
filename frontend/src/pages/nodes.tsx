@@ -1,3 +1,4 @@
+import { JoinNodeButton } from "../components/join-node";
 import type { ReactNode } from "react";
 import {
   AlertCircle,
@@ -299,7 +300,7 @@ function NodePanel({ node }: { node: NodeStatus }) {
   );
 }
 
-export function NodesPage({ overview }: { overview: Overview }) {
+export function NodesPage({ overview, onJoined }: { overview: Overview; onJoined: () => void }) {
   const nodes = overview.nodes || [];
   const online = nodes.filter((node) => node.online).length;
   if (!nodes.length)
@@ -308,8 +309,9 @@ export function NodesPage({ overview }: { overview: Overview }) {
         <Server size={28} aria-hidden="true" />
         <h2>尚未接入机器</h2>
         <p className="muted">
-          完成节点代理配置后，在这里查看连接状态与网络信息。
+          点“接入节点”，复制命令到服务器执行，信息会自动出现在这里。
         </p>
+        <JoinNodeButton onJoined={onJoined} />
       </div>
     );
   return (
@@ -323,7 +325,7 @@ export function NodesPage({ overview }: { overview: Overview }) {
           )}
           {online} / {nodes.length} 台代理在线
         </span>
-        <span className="muted">状态通过私网 mTLS 连接读取</span>
+        <JoinNodeButton onJoined={onJoined} disabled={nodes.length >= 32} />
       </div>
       <div className="node-grid">
         {nodes.map((node) => (

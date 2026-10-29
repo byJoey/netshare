@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"netshare/internal/model"
+	"netshare/internal/registration"
 )
 
 type Controller struct {
@@ -25,6 +26,8 @@ type Controller struct {
 	mutation   sync.Mutex
 	state      State
 	auth       *authState
+	joinMu     sync.Mutex
+	signNode   func(context.Context, registration.SignRequest) (registration.SignReply, error)
 }
 
 func New(cfg Config, agents Agents) (*Controller, error) {
@@ -83,12 +86,33 @@ func (c *Controller) snapshot() State {
 	return s
 }
 func (c *Controller) node(id string) (model.Node, bool) {
-	for _, n := range c.cfg.Nodes {
+	for _, n := range c.nodes() {
 		if n.ID == id {
 			return n, true
 		}
 	}
 	return model.Node{}, false
+}
+
+func (c *Controller) nodes() []model.Node {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]model.Node{}, c.cfg.Nodes...)
+}
+
+func (c *Controller) targets(id string) []string {
+	result := []string{}
+	for _, node := range c.nodes() {
+		if node.ID != id {
+			result = append(result, node.PrivateIP)
+		}
+	}
+	return result
+}
+
+func (c *Controller) applyRequest(n model.Node, revision uint64, mappings []model.Mapping) model.ApplyRequest {
+	targets := c.targets(n.ID)
+	return model.ApplyRequest{Revision: revision, Rules: c.rules(mappings, n.ID), AllowedTargets: &targets}
 }
 func (c *Controller) rules(maps []model.Mapping, node string) []model.AgentRule {
 	rs := []model.AgentRule{}
@@ -177,7 +201,7 @@ func (c *Controller) rollback(old State, nodes []model.Node, rev uint64) error {
 	defer cancel()
 	var failures []string
 	for _, n := range nodes {
-		_, e := c.agents.Apply(ctx, n, model.ApplyRequest{Revision: rev, Rules: c.rules(old.Mappings, n.ID)})
+		_, e := c.agents.Apply(ctx, n, c.applyRequest(n, rev, old.Mappings))
 		if e != nil {
 			failures = append(failures, e.Error())
 		}
@@ -197,14 +221,14 @@ func (c *Controller) commitMappings(ctx context.Context, maps []model.Mapping, a
 	next.Mappings = maps
 	next.Revision = old.Revision + 1
 	var applied []model.Node
-	for _, n := range c.cfg.Nodes {
+	for _, n := range c.nodes() {
 		before, after := c.rules(old.Mappings, n.ID), c.rules(maps, n.ID)
 		if reflect.DeepEqual(before, after) {
 			continue
 		}
 		// 把本次失败的机器也加入回退，覆盖响应丢失但代理已经应用的情况。
 		applied = append(applied, n)
-		if _, e := c.agents.Apply(ctx, n, model.ApplyRequest{Revision: next.Revision, Rules: after}); e != nil {
+		if _, e := c.agents.Apply(ctx, n, c.applyRequest(n, next.Revision, maps)); e != nil {
 			re := c.rollback(old, applied, next.Revision+1)
 			old.Revision = next.Revision + 1
 			appendEvent(&old, action, e.Error(), false)
@@ -256,8 +280,8 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	}
 	s.Revision++
 	var failures []string
-	for _, n := range c.cfg.Nodes {
-		if _, e := c.agents.Apply(ctx, n, model.ApplyRequest{Revision: s.Revision, Rules: c.rules(s.Mappings, n.ID)}); e != nil {
+	for _, n := range c.nodes() {
+		if _, e := c.agents.Apply(ctx, n, c.applyRequest(n, s.Revision, s.Mappings)); e != nil {
 			failures = append(failures, e.Error())
 		}
 	}
@@ -276,9 +300,10 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 }
 
 func (c *Controller) nodeStatuses(ctx context.Context) []model.NodeStatus {
-	out := make([]model.NodeStatus, len(c.cfg.Nodes))
+	nodes := c.nodes()
+	out := make([]model.NodeStatus, len(nodes))
 	var wg sync.WaitGroup
-	for i, n := range c.cfg.Nodes {
+	for i, n := range nodes {
 		wg.Add(1)
 		go func(i int, n model.Node) {
 			defer wg.Done()

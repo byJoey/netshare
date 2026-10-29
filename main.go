@@ -14,6 +14,7 @@ import (
 	"netshare/internal/bootstrap"
 	"netshare/internal/control"
 	"netshare/internal/model"
+	"netshare/internal/registration"
 	"netshare/internal/webui"
 )
 
@@ -28,7 +29,12 @@ func run(ctx context.Context, args []string) error {
 	case "init":
 		return bootstrap.Run(args[1:])
 	case "node":
+		if len(args) > 1 && (args[1] == "join" || args[1] == "complete") {
+			return registration.JoinCommand(ctx, args[1:])
+		}
 		return bootstrap.NodeCommand(args[1:])
+	case "signer":
+		return registration.SignerCommand(ctx, args[1:])
 	case "check-agent":
 		return agent.CheckCommand(ctx, args[1:])
 	case "access-path":

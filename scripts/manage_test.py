@@ -60,6 +60,13 @@ FAKE_BINARY = r'''#!/usr/bin/env python3
 import json,os,pathlib,secrets,sys,tempfile
 r=pathlib.Path(os.environ['NETSHARE_TEST_ROOT']);a=sys.argv[1:]
 if a==['version']:print('NetShare FAKE_VERSION');raise SystemExit(0)
+if a[:2]==['signer','init']:
+ p=pathlib.Path(a[a.index('--dir')+1]);p.mkdir(parents=True,exist_ok=True)
+ for name in ['ca.pem','ca-key.pem']:
+  if not (p/name).exists():(p/name).write_text('隔离签发占位资料')
+  (p/name).chmod(0o600)
+ raise SystemExit(0)
+
 if a[:2] not in [['access-path','show'],['access-path','rotate']]:raise SystemExit(2)
 p=pathlib.Path(a[a.index('--config')+1]);c=json.loads(p.read_text())
 if a[1]=='rotate':

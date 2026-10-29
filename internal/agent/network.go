@@ -217,7 +217,7 @@ func (s *Server) listeners(ctx context.Context) ([]model.Listener, error) {
 func (s *Server) Status(ctx context.Context) (model.AgentStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	status := model.AgentStatus{NodeID: s.cfg.Node.ID, Version: model.Version, Revision: s.state.Revision, SavedRevision: s.state.Revision, AppliedAt: s.state.AppliedAt, Rules: append([]model.AgentRule{}, s.state.Rules...), Listeners: []model.Listener{}, Interfaces: []model.InterfaceStats{}, Warnings: []string{}, UptimeSeconds: int64(time.Since(s.started).Seconds())}
+	status := model.AgentStatus{NodeID: s.cfg.Node.ID, AutomaticTargets: true, AllowedTargets: s.allowedTargets(), Version: model.Version, Revision: s.state.Revision, SavedRevision: s.state.Revision, AppliedAt: s.state.AppliedAt, Rules: append([]model.AgentRule{}, s.state.Rules...), Listeners: []model.Listener{}, Interfaces: []model.InterfaceStats{}, Warnings: []string{}, UptimeSeconds: int64(time.Since(s.started).Seconds())}
 	if s.restoreWarning != "" {
 		status.Warnings = append(status.Warnings, s.restoreWarning)
 	}
@@ -279,6 +279,8 @@ func sameComments(a, b map[string]bool) bool {
 }
 
 func (s *Server) Probe(ctx context.Context, req model.ProbeRequest) (model.ProbeResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.allowed[req.TargetIP] {
 		return model.ProbeResult{}, bad(400, "检查目标不在本节点的私网白名单中")
 	}
@@ -375,4 +377,13 @@ func (s *Server) restoreForwarding(snapshot *forwardSnapshot) error {
 func ValidateTarget(ip, local string) bool {
 	a, err := netip.ParseAddr(ip)
 	return err == nil && a.Is4() && a.IsPrivate() && a.String() == ip && ip != local
+}
+
+func (s *Server) allowedTargets() []string {
+	out := []string{}
+	for ip := range s.allowed {
+		out = append(out, ip)
+	}
+	sort.Strings(out)
+	return out
 }

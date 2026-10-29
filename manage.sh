@@ -19,6 +19,10 @@ BUNDLE=""
 PAIRING=""
 PAIRING_READY=false
 JOIN=""
+AUTO_JOIN=false
+JOIN_DIR=""
+TX_SIGN_ACTIVE=false
+TX_SIGN_ENABLED=false
 NODE_ACTION="add"
 EMIT_INVITES=true
 LOCAL_NODE=false
@@ -121,7 +125,7 @@ ensure_inspection_python() {
   command -v python3 >/dev/null 2>&1 && return 0
   [[ "$ROLE" == agent ]] || return 0
   if [[ -n "$JOIN" ]];then
-    [[ ${#JOIN} -le 8192 && "$JOIN" =~ ^https?://[^[:space:]\#]+/api/enroll/[a-f0-9]{32}\#[A-Za-z0-9_-]{43}$ ]] || die "接入码格式无效；尚未安装依赖或下载程序"
+    [[ ${#JOIN} -le 8192 && "$JOIN" =~ ^https?://[^[:space:]\#]+/api/(enroll|join)/[a-f0-9]{32}\#[A-Za-z0-9_-]{43}$ ]] || die "接入码格式无效；尚未安装依赖或下载程序"
   elif [[ -n "$PAIRING" ]];then
     [[ -f "$PAIRING" && ! -L "$PAIRING" ]] || die "节点安装包不存在或不是普通文件，尚未安装依赖或下载程序"
   elif [[ -n "$BUNDLE" ]];then
@@ -301,13 +305,22 @@ snapshot_begin() {
   ensure_private_dir "$TX_DIR"
   TX_STARTED=true
   # 停止写入后再快照，回退不能覆盖停机前刚保存的用户变更。
-  if [[ "$stop_before_snapshot" == true ]] && $TX_ACTIVE; then systemctl stop "$service"; fi
+  if [[ "$TX_ROLE" == controller ]];then
+    TX_SIGN_ACTIVE=false;TX_SIGN_ENABLED=false
+    if systemctl is-active --quiet netshare-sign;then TX_SIGN_ACTIVE=true;fi
+    if systemctl is-enabled --quiet netshare-sign;then TX_SIGN_ENABLED=true;fi
+    printf '%s %s\n' "$TX_SIGN_ACTIVE" "$TX_SIGN_ENABLED" > "$TX_DIR/sign-state"
+  fi
+  if [[ "$stop_before_snapshot" == true ]];then
+    if $TX_ACTIVE;then systemctl stop "$service";fi
+    if [[ "$TX_ROLE" == controller ]] && $TX_SIGN_ACTIVE;then systemctl stop netshare-sign;fi
+  fi
   if [[ "$TX_ROLE" == controller ]]; then cfgdir=/etc/netshare;statedir=/var/lib/netshare; else cfgdir=/etc/netshare-agent;statedir=/var/lib/netshare-agent; fi
   python3 - "$ROOT_PREFIX" "$TX_DIR" "$cfgdir" "$statedir" "$(unit_for "$TX_ROLE")" <<'PY'
 import json,os,pathlib,shutil,sys
 root,dest,cfg,state,unit=sys.argv[1:];target=pathlib.Path(dest);items=['/usr/local/bin/netshare','/usr/local/sbin/netshare-manage',cfg,state,'/etc/systemd/system/'+unit+'.service']
 if unit=='netshare-agent':items+=['/etc/sysctl.d/90-netshare-agent.conf']
-else:items+=['/var/lib/netshare-bootstrap']
+else:items+=['/var/lib/netshare-bootstrap','/etc/systemd/system/netshare-sign.service']
 records=[]
 for index,item in enumerate(items):
     p=pathlib.Path(root+item)
@@ -342,6 +355,7 @@ rollback() {
   local service
   service="$(unit_for "$TX_ROLE")"
   systemctl stop "$service" >/dev/null 2>&1 || true
+  if [[ "$TX_ROLE" == controller ]];then systemctl stop netshare-sign >/dev/null 2>&1 || true;fi
   python3 - "$ROOT_PREFIX" "$TX_DIR" <<'PY' || return 1
 import json,os,pathlib,shutil,sys
 root,dest=sys.argv[1:];base=pathlib.Path(dest)
@@ -365,6 +379,10 @@ PY
     if [[ "$(cat "$TX_DIR/nft-state")" == present ]]; then nft -f "$TX_DIR/nft-before.txt" >/dev/null 2>&1 || return 1; fi
   fi
   systemctl daemon-reload >/dev/null 2>&1 || true
+  if [[ "$TX_ROLE" == controller && -f "$TX_DIR/sign-state" ]];then
+    if $TX_SIGN_ENABLED;then systemctl enable netshare-sign >/dev/null 2>&1 || true;else systemctl disable netshare-sign >/dev/null 2>&1 || true;fi
+    if $TX_SIGN_ACTIVE;then systemctl start netshare-sign >/dev/null 2>&1 || return 1;fi
+  fi
   if $TX_ENABLED; then systemctl enable "$service" >/dev/null 2>&1 || true; else systemctl disable "$service" >/dev/null 2>&1 || true; fi
   if $TX_ACTIVE; then systemctl start "$service" >/dev/null 2>&1 || return 1;systemctl is-active --quiet "$service" || return 1; fi
   say "操作未完成，程序、配置和原服务状态已请求回退；备份：$TX_DIR" >&2
@@ -450,6 +468,65 @@ EOF
   fi
   atomic_copy "$TMP_DIR/unit" "$dest" 0644
 }
+configure_registration() {
+  local authority cfg dest
+  authority="$(path_for /var/lib/netshare-bootstrap/registration)"
+  cfg="$(config_for controller)"
+  ensure_private_dir "$authority"
+  "$(path_for /usr/local/bin/netshare)" signer init --dir "$authority"
+  atomic_copy "$authority/ca.pem" "$(path_for /etc/netshare/registration-ca.pem)" 0600
+  python3 - "$cfg" "$TEST_MODE" <<'PYCODE'
+import json,os,pathlib,pwd,sys,tempfile
+p=pathlib.Path(sys.argv[1]);c=json.loads(p.read_text())
+c['registration_socket']='/run/netshare-sign/registration.sock'
+c['registration_ca_file']='/etc/netshare/registration-ca.pem'
+fd,name=tempfile.mkstemp(dir=p.parent)
+with os.fdopen(fd,'w') as f:json.dump(c,f,ensure_ascii=False,indent=2);f.flush();os.fsync(f.fileno())
+os.chmod(name,0o600)
+if sys.argv[2]!='true':
+    user=pwd.getpwnam('netshare');os.chown(name,user.pw_uid,user.pw_gid);os.chown(p.parent/'registration-ca.pem',user.pw_uid,user.pw_gid)
+os.replace(name,p)
+PYCODE
+  dest="$(path_for /etc/systemd/system/netshare-sign.service)"
+  cat > "$TMP_DIR/sign-unit" <<'EOF'
+[Unit]
+Description=NetShare 节点接入签发
+After=network.target
+[Service]
+Type=simple
+User=root
+Group=netshare
+ExecStart=/usr/local/bin/netshare signer serve --dir /var/lib/netshare-bootstrap/registration --socket /run/netshare-sign/registration.sock
+Restart=on-failure
+RestartSec=3
+UMask=0007
+RuntimeDirectory=netshare-sign
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+CapabilityBoundingSet=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/run/netshare-sign
+[Install]
+WantedBy=multi-user.target
+EOF
+  atomic_copy "$TMP_DIR/sign-unit" "$dest" 0644
+}
+start_registration() {
+  systemctl enable netshare-sign
+  systemctl start netshare-sign
+  systemctl is-active --quiet netshare-sign
+}
+
 validate_config_layout() {
   python3 - "$1" "$2" <<'PYCODE'
 import json,sys
@@ -700,11 +777,26 @@ try:
 except ValueError:raise SystemExit("接入地址端口格式无效")
 try:key=base64.urlsafe_b64decode(u.fragment+"="*(-len(u.fragment)%4))
 except Exception:raise SystemExit("接入码解密密钥格式无效")
-if u.scheme not in ("http","https") or not u.hostname or u.username or u.password or u.query or len(key)!=32 or not re.fullmatch(r"[A-Za-z0-9_-]{43}",u.fragment) or not re.search(r"/api/enroll/[a-f0-9]{32}$",u.path) or posixpath.normpath(u.path)!=u.path or "\\" in u.path or "%" in u.path:raise SystemExit("接入码格式无效；请从控制台 14 重新生成")
+if u.scheme not in ("http","https") or not u.hostname or u.username or u.password or u.query or len(key)!=32 or not re.fullmatch(r"[A-Za-z0-9_-]{43}",u.fragment) or not re.search(r"/api/(enroll|join)/[a-f0-9]{32}$",u.path) or posixpath.normpath(u.path)!=u.path or "\\" in u.path or "%" in u.path:raise SystemExit("接入码格式无效；请回面板重新生成命令")
 '
 }
 
 fetch_join() {
+  if [[ "$JOIN" == */api/join/* ]];then
+    AUTO_JOIN=true
+    local digest
+    digest="$(printf '%s' "$JOIN" | python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+    JOIN_DIR="$(path_for /var/backups/netshare-imports)/auto-$digest"
+    ensure_private_dir "$JOIN_DIR"
+    local -a options=()
+    [[ -z "$PUBLIC_IP" ]] || options+=(--public-ip "$PUBLIC_IP")
+    [[ -z "$PRIVATE_INTERFACE" ]] || options+=(--private-interface "$PRIVATE_INTERFACE")
+    [[ -z "$NODE_NAME" ]] || options+=(--name "$NODE_NAME")
+    printf '%s\n' "$JOIN" | "$TMP_DIR/package-binary" node join --invitation-stdin --dir "$JOIN_DIR" --existing "$(path_for /etc/netshare-agent)" "${options[@]}"
+    BUNDLE="$JOIN_DIR"
+    validate_bundle
+    return 0
+  fi
   printf '%s\n' "$JOIN" | "$TMP_DIR/package-binary" node fetch --invitation-stdin --dir "$TMP_DIR/joined" >/dev/null
   local retained
   retained="$(path_for /var/backups/netshare-imports)/$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets;print(secrets.token_hex(4))')"
@@ -830,7 +922,7 @@ install_role() {
       select_local_node
       LOCAL_NODE=true
     elif [[ -z "$PAIRING" && -z "$BUNDLE" && -z "$JOIN" && ! -f "$cfg" ]];then
-      die "首次节点接入需要控制台生成的接入码或安装包；请先在控制台选择 13 添加节点，已有节点选 14 重发命令"
+      die "首次节点接入需要控制台生成的接入码或安装包；请打开网页面板点击「接入节点」，复制命令到这台服务器执行"
     fi
     [[ -z "$PAIRING" || ( -f "$PAIRING" && ! -L "$PAIRING" ) ]] || die "节点安装包不存在或不是普通文件，尚未安装依赖或下载程序"
     [[ -z "$JOIN" ]] || validate_join
@@ -847,7 +939,10 @@ install_role() {
     PAIRING="$LAST_PAIRINGS/netshare-node-$NODE_ID.tar.gz"
   fi
   if [[ -n "$JOIN" ]];then fetch_join;fi
-  if [[ "$ROLE" == agent && -n "$PAIRING" ]];then
+  if $AUTO_JOIN;then
+    replace_pairing=true
+    if [[ -f "$cfg" ]];then existing=true;fi
+  elif [[ "$ROLE" == agent && -n "$PAIRING" ]];then
     prepare_pairing
     replace_pairing=true
     if [[ -f "$cfg" ]];then
@@ -880,13 +975,19 @@ PYCODE
     if $AUTO_BOOTSTRAP; then install_bootstrap; fi
     install_bundle
   fi
-  if [[ "$ROLE" == controller ]]; then ensure_random_path; fi
+  if [[ "$ROLE" == controller ]]; then ensure_random_path;configure_registration; fi
   write_unit "$ROLE"
   systemctl daemon-reload
   if ! $NO_START; then
+    if [[ "$ROLE" == controller ]];then start_registration;fi
     systemctl enable "$service";systemctl start "$service";service_health
   fi
   TX_STARTED=false
+  if $AUTO_JOIN && ! $NO_START;then
+    if ! printf '%s\n' "$JOIN" | "$(path_for /usr/local/bin/netshare)" node complete --invitation-stdin --dir "$JOIN_DIR";then
+      say '节点已安装，面板会自动检查连接；若未上线，重新执行同一条命令即可。'
+    fi
+  fi
   say "安装完成：${ROLE}。配置和映射已保留；备份：$TX_DIR"
   if $NO_START; then say "服务尚未启动。"; fi
   if [[ "$ROLE" == controller ]]; then show_controller_delivery; fi
@@ -903,8 +1004,12 @@ upgrade_role() {
   service="$(unit_for "$ROLE")"
   atomic_copy "$PACKAGE_DIR/netshare" "$(path_for /usr/local/bin/netshare)" 0755
   atomic_copy "$PACKAGE_DIR/manage.sh" "$(path_for /usr/local/sbin/netshare-manage)" 0755
-  if [[ "$ROLE" == controller ]]; then ensure_random_path; fi
-  if $TX_ACTIVE; then systemctl start "$service";service_health; fi
+  if [[ "$ROLE" == controller ]]; then ensure_random_path;configure_registration; fi
+  systemctl daemon-reload
+  if $TX_ACTIVE; then
+    if [[ "$ROLE" == controller ]];then start_registration;fi
+    systemctl start "$service";service_health
+  fi
   TX_STARTED=false
   say "升级完成：${ROLE}。原启停状态已保留；备份：$TX_DIR"
   say "控制器与节点共用程序文件，另一角色的运行进程保持原样；需要更新其进程时单独重启该角色。"
@@ -1100,6 +1205,10 @@ uninstall_role() {
   if [[ "$ROLE" == agent ]]; then command -v nft >/dev/null || die "缺少 nft，无法确认并清理本工具的规则表"; fi
   lock_mutation;snapshot_begin "$ROLE"
   systemctl disable --now "$service"
+  if [[ "$ROLE" == controller && -f "$(path_for /etc/systemd/system/netshare-sign.service)" ]];then
+    systemctl disable --now netshare-sign
+    rm -f -- "$(path_for /etc/systemd/system/netshare-sign.service)"
+  fi
   if [[ "$ROLE" == agent ]]; then
     if nft list table ip netshare >/dev/null 2>&1; then nft delete table ip netshare; fi
     rm -f -- "$(path_for /etc/sysctl.d/90-netshare-agent.conf)"
@@ -1149,7 +1258,7 @@ menu() {
     say '';say 'NetShare 管理'
     say '1 安装控制台  2 接入 / 安装节点  3 升级  4 查看状态  5 查看日志'
     say '6 启动  7 停止  8 重启  9 查看入口  10 更换入口  11 备份  12 卸载'
-    say '13 添加远端节点 / 生成接入命令  14 重发节点接入命令  0 退出'
+    say '13 高级：手动登记节点  14 高级：重发旧配对命令  0 退出'
     read -r -p '选择：' choice || break
     args=()
     case "$choice" in
@@ -1162,7 +1271,8 @@ menu() {
         if [[ -f "$(config_for controller)" && -f "$(path_for /var/lib/netshare-bootstrap/authority/ca-key.pem)" ]];then
           say '检测到本机控制台，将就地识别网卡并登记或更新本机节点。'
         else
-          say '1 粘贴接入码（推荐）  2 导入安装包  3 按现有配置重装  0 返回'
+          say '新节点：在网页面板点“接入节点”，执行生成的命令即可。'
+          say '1 粘贴接入码  2 高级：导入安装包  3 按现有配置重装  0 返回'
           read -r -p '接入方式：' response || break
           case "$response" in
             1)read -r -p '接入码 URL#KEY（空或 0 返回）：' pairing || break;[[ -n "$pairing" && "$pairing" != 0 ]] || continue;args+=(--join "$pairing");;

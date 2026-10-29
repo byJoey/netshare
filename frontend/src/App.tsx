@@ -767,6 +767,7 @@ export function App() {
               overview={overview}
               busy={busy}
               onCreate={() => openEditor()}
+              onJoined={() => void refresh(true)}
               onEdit={(mapping) => openEditor(mapping)}
               onReverse={(mapping) => reverseDraft(mappingInput(mapping))}
               onDelete={deleteMapping}
@@ -778,7 +779,7 @@ export function App() {
               notify={notify}
             />
           ) : view === "nodes" ? (
-            <NodesPage overview={overview} />
+            <NodesPage overview={overview} onJoined={() => void refresh(true)} />
           ) : view === "events" ? (
             <EventsPage overview={overview} />
           ) : (

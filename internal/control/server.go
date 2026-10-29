@@ -49,6 +49,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 
 func (c *Controller) Handler(assets fs.FS) http.Handler {
 	m := http.NewServeMux()
+	c.registrationRoutes(m)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true, "version": model.Version})
 	})
@@ -377,6 +378,7 @@ func Run(ctx context.Context, path string, assets fs.FS) error {
 		return e
 	}
 	c.configPath = path
+	go c.maintainTopology(ctx)
 	srv := &http.Server{Addr: cfg.Listen, Handler: c.Handler(assets), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
 		child, cancel := context.WithTimeout(ctx, 90*time.Second)

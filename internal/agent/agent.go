@@ -90,6 +90,7 @@ type diskState struct {
 	Rules              []model.AgentRule `json:"rules"`
 	AppliedAt          time.Time         `json:"applied_at"`
 	OriginalForwarding *bool             `json:"original_forwarding,omitempty"`
+	AllowedTargets     *[]string         `json:"allowed_targets,omitempty"`
 }
 
 type Server struct {
@@ -151,13 +152,10 @@ func NewServer(cfg Config, runner CommandRunner) (*Server, error) {
 		runner = ExecRunner{}
 	}
 	s := &Server{cfg: cfg, runner: runner, started: time.Now(), allowed: map[string]bool{}, readFile: os.ReadFile, writeFile: atomicWrite, removeFile: os.Remove, forwardFile: defaultForwardFile, sysctlFile: defaultSysctlFile}
-	for _, ip := range cfg.AllowedTargets {
-		a, e := netip.ParseAddr(ip)
-		if e != nil || !a.Is4() || !a.IsPrivate() || a.String() != ip || ip == cfg.Node.PrivateIP {
-			return nil, fmt.Errorf("允许的目标地址必须是其他机器的规范私网 IPv4")
-		}
-		s.allowed[ip] = true
+	if s.allowed, err = targetSet(cfg.AllowedTargets, cfg.Node.PrivateIP); err != nil {
+		return nil, err
 	}
+
 	// 首台节点可先在线待配对；空白名单仍拒绝所有转发目标。
 	s.state = diskState{NodeID: cfg.Node.ID, Rules: []model.AgentRule{}}
 	data, err := os.ReadFile(cfg.StateFile)
@@ -171,6 +169,11 @@ func NewServer(cfg Config, runner CommandRunner) (*Server, error) {
 		if s.state.NodeID != cfg.Node.ID {
 			return nil, fmt.Errorf("状态文件属于另一台机器")
 		}
+		if s.state.AllowedTargets != nil {
+			if s.allowed, err = targetSet(*s.state.AllowedTargets, cfg.Node.PrivateIP); err != nil {
+				return nil, err
+			}
+		}
 		if err := s.validateRules(s.state.Rules, nil); err != nil {
 			return nil, fmt.Errorf("已保存的节点配置无效：%w", err)
 		}
@@ -178,6 +181,21 @@ func NewServer(cfg Config, runner CommandRunner) (*Server, error) {
 		return nil, fmt.Errorf("读取节点状态失败：%w", err)
 	}
 	return s, nil
+}
+
+func targetSet(targets []string, self string) (map[string]bool, error) {
+	if len(targets) > 31 {
+		return nil, bad(400, "私网目标最多31台")
+	}
+	result := map[string]bool{}
+	for _, ip := range targets {
+		a, err := netip.ParseAddr(ip)
+		if err != nil || !a.Is4() || !a.IsPrivate() || a.String() != ip || ip == self || result[ip] {
+			return nil, bad(400, "允许的目标地址必须是其他机器的不重复规范私网IPv4")
+		}
+		result[ip] = true
+	}
+	return result, nil
 }
 
 func (s *Server) command(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error) {
@@ -294,12 +312,26 @@ func (s *Server) Apply(ctx context.Context, req model.ApplyRequest) (model.Apply
 }
 
 func (s *Server) applyLocked(ctx context.Context, req model.ApplyRequest, restore bool) (model.ApplyResult, error) {
+	previousAllowed := s.allowed
+	committed := false
+	defer func() {
+		if !committed {
+			s.allowed = previousAllowed
+		}
+	}()
+	if req.AllowedTargets != nil {
+		allowed, err := targetSet(*req.AllowedTargets, s.cfg.Node.PrivateIP)
+		if err != nil {
+			return model.ApplyResult{}, err
+		}
+		s.allowed = allowed
+	}
 	if err := s.validateRules(req.Rules, nil); err != nil {
 		return model.ApplyResult{}, err
 	}
 	req.Rules = canonicalRules(req.Rules)
 	old := s.state
-	if !restore && (req.Revision < old.Revision || (req.Revision == old.Revision && !reflect.DeepEqual(req.Rules, canonicalRules(old.Rules)))) {
+	if !restore && (req.Revision < old.Revision || (req.Revision == old.Revision && (!reflect.DeepEqual(req.Rules, canonicalRules(old.Rules)) || !reflect.DeepEqual(previousAllowed, s.allowed)))) {
 		return model.ApplyResult{}, bad(409, "配置版本过旧或相同版本包含不同内容，请刷新后重试")
 	}
 	listeners, err := s.listeners(ctx)
@@ -324,7 +356,11 @@ func (s *Server) applyLocked(ctx context.Context, req model.ApplyRequest, restor
 	if err = s.ensureOwnership(ctx); err != nil {
 		return model.ApplyResult{}, err
 	}
-	next := diskState{NodeID: s.cfg.Node.ID, Revision: req.Revision, Rules: req.Rules, AppliedAt: time.Now().UTC(), OriginalForwarding: old.OriginalForwarding}
+	next := diskState{NodeID: s.cfg.Node.ID, Revision: req.Revision, Rules: req.Rules, AppliedAt: time.Now().UTC(), OriginalForwarding: old.OriginalForwarding, AllowedTargets: old.AllowedTargets}
+	if req.AllowedTargets != nil {
+		targets := append([]string{}, (*req.AllowedTargets)...)
+		next.AllowedTargets = &targets
+	}
 	var forwarding *forwardSnapshot
 	if hasEnabled(req.Rules) {
 		forwarding, err = s.enableForwarding()
@@ -358,6 +394,7 @@ func (s *Server) applyLocked(ctx context.Context, req model.ApplyRequest, restor
 		return model.ApplyResult{}, combineRollback(fmt.Errorf("保存节点配置失败：%w", err), errors.Join(kernelErr, diskErr, rollbackForward()))
 	}
 	s.state = next
+	committed = true
 	s.restoreWarning = ""
 	return model.ApplyResult{Revision: next.Revision, AppliedAt: next.AppliedAt}, nil
 }

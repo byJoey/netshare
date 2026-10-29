@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-var Version = "1.2.2"
+var Version = "1.3.0"
 
 var accessPathPattern = regexp.MustCompile(`^/[A-Za-z0-9][A-Za-z0-9_-]{15,95}$`)
 
@@ -67,8 +67,9 @@ type AgentRule struct {
 }
 
 type ApplyRequest struct {
-	Revision uint64      `json:"revision"`
-	Rules    []AgentRule `json:"rules"`
+	Revision       uint64      `json:"revision"`
+	Rules          []AgentRule `json:"rules"`
+	AllowedTargets *[]string   `json:"allowed_targets,omitempty"`
 }
 
 type ApplyResult struct {
@@ -90,17 +91,19 @@ type InterfaceStats struct {
 }
 
 type AgentStatus struct {
-	NodeID        string           `json:"node_id"`
-	Version       string           `json:"version"`
-	Revision      uint64           `json:"revision"`
-	SavedRevision uint64           `json:"saved_revision"`
-	AppliedAt     time.Time        `json:"applied_at"`
-	Forwarding    bool             `json:"forwarding"`
-	Rules         []AgentRule      `json:"rules"`
-	Listeners     []Listener       `json:"listeners"`
-	Interfaces    []InterfaceStats `json:"interfaces"`
-	UptimeSeconds int64            `json:"uptime_seconds"`
-	Warnings      []string         `json:"warnings"`
+	NodeID           string           `json:"node_id"`
+	Version          string           `json:"version"`
+	Revision         uint64           `json:"revision"`
+	SavedRevision    uint64           `json:"saved_revision"`
+	AppliedAt        time.Time        `json:"applied_at"`
+	Forwarding       bool             `json:"forwarding"`
+	Rules            []AgentRule      `json:"rules"`
+	Listeners        []Listener       `json:"listeners"`
+	Interfaces       []InterfaceStats `json:"interfaces"`
+	UptimeSeconds    int64            `json:"uptime_seconds"`
+	Warnings         []string         `json:"warnings"`
+	AutomaticTargets bool             `json:"automatic_targets"`
+	AllowedTargets   []string         `json:"allowed_targets,omitempty"`
 }
 
 type NodeStatus struct {

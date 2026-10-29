@@ -20,17 +20,19 @@ import (
 )
 
 type Config struct {
-	Listen       string       `json:"listen"`
-	ExternalURL  string       `json:"external_url"`
-	AccessPath   string       `json:"access_path,omitempty"`
-	Username     string       `json:"username"`
-	PasswordHash string       `json:"password_hash"`
-	StateFile    string       `json:"state_file"`
-	CAFile       string       `json:"ca_file"`
-	CertFile     string       `json:"cert_file"`
-	KeyFile      string       `json:"key_file"`
-	CookieSecure bool         `json:"cookie_secure"`
-	Nodes        []model.Node `json:"nodes"`
+	Listen             string       `json:"listen"`
+	ExternalURL        string       `json:"external_url"`
+	AccessPath         string       `json:"access_path,omitempty"`
+	Username           string       `json:"username"`
+	PasswordHash       string       `json:"password_hash"`
+	StateFile          string       `json:"state_file"`
+	CAFile             string       `json:"ca_file"`
+	CertFile           string       `json:"cert_file"`
+	KeyFile            string       `json:"key_file"`
+	CookieSecure       bool         `json:"cookie_secure"`
+	Nodes              []model.Node `json:"nodes"`
+	RegistrationSocket string       `json:"registration_socket,omitempty"`
+	RegistrationCAFile string       `json:"registration_ca_file,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -50,6 +52,9 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if !filepath.IsAbs(cfg.StateFile) {
 		return cfg, fmt.Errorf("状态文件必须使用绝对路径")
+	}
+	if (cfg.RegistrationSocket == "") != (cfg.RegistrationCAFile == "") || cfg.RegistrationSocket != "" && (!filepath.IsAbs(cfg.RegistrationSocket) || !filepath.IsAbs(cfg.RegistrationCAFile)) {
+		return cfg, fmt.Errorf("节点接入服务路径必须完整且使用绝对路径")
 	}
 	if cfg.Listen == "" || cfg.Username == "" || cfg.StateFile == "" {
 		return cfg, fmt.Errorf("控制台监听、用户名和状态路径不能为空")
@@ -109,6 +114,12 @@ func agentHTTPClient(cfg Config) (*http.Client, error) {
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(ca) {
 		return nil, fmt.Errorf("代理 CA 无效")
+	}
+	if cfg.RegistrationCAFile != "" {
+		data, err := os.ReadFile(cfg.RegistrationCAFile)
+		if err != nil || !roots.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("自动接入CA公证书无效")
+		}
 	}
 	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
 	if err != nil {
