@@ -112,8 +112,8 @@ bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/in
 从 v1.2.x 升级时，先在控制台服务器升级控制台，再在已有节点各升级一次代理，即可启用自动同步：
 
 ```bash
-sudo netshare-manage upgrade controller
-sudo netshare-manage upgrade agent
+bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh) upgrade controller
+bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh) upgrade agent
 ```
 
 顶部下载命令需要 `curl`；Debian / Ubuntu 缺少的 Python 3、`nftables`、`iproute2` 由安装器补齐。旧版的菜单 13/14、离线配对包和手工清单放在高级安装方式里，不是普通接入的前置步骤。

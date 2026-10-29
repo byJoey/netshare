@@ -71,7 +71,7 @@ func (c *Controller) saveTicket(ticket joinTicket) error {
 func (c *Controller) joinInfo(r *http.Request) (registration.Info, error) {
 	var info registration.Info
 	if c.cfg.RegistrationSocket == "" || c.cfg.RegistrationCAFile == "" {
-		return info, fmt.Errorf("请先在控制台服务器升级NetShare，接入按钮会自动就绪")
+		return info, fmt.Errorf("请在控制台服务器运行最新版安装脚本，选择3升级控制台以启用接入")
 	}
 	var err error
 	info.ControllerCA, err = os.ReadFile(c.cfg.CAFile)
@@ -80,7 +80,7 @@ func (c *Controller) joinInfo(r *http.Request) (registration.Info, error) {
 	}
 	info.IssuerCA, err = os.ReadFile(c.cfg.RegistrationCAFile)
 	if err != nil {
-		return info, fmt.Errorf("节点接入服务尚未就绪，请在控制台服务器重新运行升级")
+		return info, fmt.Errorf("节点接入服务尚未就绪，请用最新版安装脚本升级控制台")
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(info.ControllerCA) || !pool.AppendCertsFromPEM(info.IssuerCA) {
