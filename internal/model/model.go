@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-var Version = "1.3.1"
+var Version = "1.3.2"
 
 var accessPathPattern = regexp.MustCompile(`^/[A-Za-z0-9][A-Za-z0-9_-]{15,95}$`)
 
