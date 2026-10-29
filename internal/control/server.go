@@ -62,6 +62,7 @@ func (c *Controller) Handler(assets fs.FS) http.Handler {
 	m.HandleFunc("POST /api/password", c.protected(c.handlePassword, true))
 	m.HandleFunc("GET /api/overview", c.protected(c.handleOverview, false))
 	m.HandleFunc("GET /api/export", c.protected(c.handleExport, false))
+	m.HandleFunc("PATCH /api/nodes/{id}/name", c.protected(c.handleRenameNode, true))
 	m.HandleFunc("POST /api/mappings", c.protected(c.handleCreate, true))
 	m.HandleFunc("PUT /api/mappings/{id}", c.protected(c.handleUpdate, true))
 	m.HandleFunc("DELETE /api/mappings/{id}", c.protected(c.handleDelete, true))

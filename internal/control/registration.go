@@ -24,6 +24,7 @@ import (
 
 type joinTicket struct {
 	ID        string              `json:"id"`
+	Name      string              `json:"name,omitempty"`
 	Secret    string              `json:"secret"`
 	ExpiresAt time.Time           `json:"expires_at"`
 	Phase     string              `json:"phase"`
@@ -113,6 +114,18 @@ func (c *Controller) joinInfo(r *http.Request) (registration.Info, error) {
 func quoteShell(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
 
 func (c *Controller) handleCreateJoin(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	// 兼容旧版直接发送无请求体的生成命令操作。
+	if r.Body != nil && r.ContentLength != 0 && !decodeJSON(w, r, &in) {
+		return
+	}
+	name, err := normalizeNodeName(in.Name, true)
+	if err != nil {
+		apiError(w, 400, err.Error())
+		return
+	}
 	if _, err := c.joinInfo(nil); err != nil {
 		apiError(w, 503, err.Error())
 		return
@@ -142,14 +155,14 @@ func (c *Controller) handleCreateJoin(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 500, "生成接入命令失败，请重试")
 		return
 	}
-	ticket := joinTicket{ID: id, Secret: secret, ExpiresAt: time.Now().UTC().Add(15 * time.Minute), Phase: "waiting", Message: "等待在新服务器执行命令"}
+	ticket := joinTicket{ID: id, Name: name, Secret: secret, ExpiresAt: time.Now().UTC().Add(15 * time.Minute), Phase: "waiting", Message: "等待在新服务器执行命令"}
 	if err = c.saveTicket(ticket); err != nil {
 		apiError(w, 500, "保存接入命令失败，请检查磁盘")
 		return
 	}
 	invitation := strings.TrimRight(c.cfg.ExternalURL, "/") + c.cfg.AccessPath + "/api/join/" + id + "#" + secret
 	command := "bash <(curl -fsSL https://github.com/byJoey/netshare/releases/latest/download/install.sh) install agent --join " + quoteShell(invitation)
-	writeJSON(w, 200, map[string]any{"id": id, "command": command, "expires_at": ticket.ExpiresAt, "phase": ticket.Phase, "message": ticket.Message})
+	writeJSON(w, 200, map[string]any{"id": id, "name": ticket.Name, "command": command, "expires_at": ticket.ExpiresAt, "phase": ticket.Phase, "message": ticket.Message})
 }
 
 func (c *Controller) handleJoinStatus(w http.ResponseWriter, r *http.Request) {
@@ -160,9 +173,10 @@ func (c *Controller) handleJoinStatus(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 404, err.Error())
 		return
 	}
-	phase, message := ticket.Phase, ticket.Message
+	phase, message, name := ticket.Phase, ticket.Message, ticket.Name
 	if phase != "revoked" && ticket.NodeID != "" {
 		if node, ok := c.node(ticket.NodeID); ok {
+			name = node.Name
 			child, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			status, e := c.agents.Status(child, node)
 			cancel()
@@ -177,7 +191,7 @@ func (c *Controller) handleJoinStatus(w http.ResponseWriter, r *http.Request) {
 	} else if phase != "revoked" && !time.Now().Before(ticket.ExpiresAt) {
 		phase, message = "expired", "这条命令已过期，请重新生成"
 	}
-	writeJSON(w, 200, map[string]any{"id": ticket.ID, "phase": phase, "message": message, "node_id": ticket.NodeID, "expires_at": ticket.ExpiresAt})
+	writeJSON(w, 200, map[string]any{"id": ticket.ID, "name": name, "phase": phase, "message": message, "node_id": ticket.NodeID, "expires_at": ticket.ExpiresAt})
 }
 
 func (c *Controller) handleRevokeJoin(w http.ResponseWriter, r *http.Request) {
@@ -284,6 +298,9 @@ func (c *Controller) registerNode(ctx context.Context, ticket *joinTicket, repor
 	if index >= 0 {
 		node.Name = nodes[index].Name
 		node.ReservedPorts = nodes[index].ReservedPorts
+	}
+	if ticket.Name != "" {
+		node.Name = ticket.Name
 	}
 	ticket.KeyID, ticket.NodeID, ticket.Phase, ticket.Message = keyID, node.ID, "registering", "正在登记服务器"
 	if err = c.saveTicket(*ticket); err != nil {

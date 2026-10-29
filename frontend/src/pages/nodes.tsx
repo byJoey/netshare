@@ -1,4 +1,5 @@
 import { JoinNodeButton } from "../components/join-node";
+import { NodeNameEditor } from "../components/node-name";
 import type { ReactNode } from "react";
 import {
   AlertCircle,
@@ -68,7 +69,7 @@ function Fact({
   );
 }
 
-function NodePanel({ node }: { node: NodeStatus }) {
+function NodePanel({ node, onRenamed }: { node: NodeStatus; onRenamed: () => void }) {
   const status = node.status;
   const ports = [...new Set([22, ...(node.reserved_ports || [])])].sort(
     (a, b) => a - b,
@@ -87,8 +88,8 @@ function NodePanel({ node }: { node: NodeStatus }) {
           <span className="node-icon">
             <Server size={20} aria-hidden="true" />
           </span>
-          <div>
-            <h2 id={`node-title-${node.id}`}>{node.name}</h2>
+          <div className="node-identity">
+            <NodeNameEditor node={node} onSaved={onRenamed} />
             <p className="muted mono">{node.id}</p>
           </div>
         </div>
@@ -329,7 +330,7 @@ export function NodesPage({ overview, onJoined }: { overview: Overview; onJoined
       </div>
       <div className="node-grid">
         {nodes.map((node) => (
-          <NodePanel key={node.id} node={node} />
+          <NodePanel key={node.id} node={node} onRenamed={onJoined} />
         ))}
       </div>
       <div className="info-banner">

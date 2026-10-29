@@ -2,19 +2,23 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"netshare/internal/model"
+	"netshare/internal/registration"
 	"netshare/internal/webui"
 )
 
@@ -46,6 +50,10 @@ func TestUIAcceptanceServer(t *testing.T) {
 	}
 	defer listener.Close()
 	c, agents := testController(t)
+	c.cfg.StateFile, err = filepath.EvalSymlinks(c.cfg.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
 	c.agents = &uiAcceptanceAgents{fakeAgents: agents}
 	c.cfg.Listen = "127.0.0.1:19111"
 	c.cfg.ExternalURL = "http://127.0.0.1:19111"
@@ -78,6 +86,23 @@ func TestUIAcceptanceServer(t *testing.T) {
 	}
 	c.cfg.PasswordHash = string(hash)
 	c.configPath = filepath.Join(t.TempDir(), "controller.json")
+	if os.Getenv("NETSHARE_UI_ACCEPTANCE_JOIN") == "1" {
+		// 签发与节点状态都在本机临时测试环境，不连接用户机器。
+		signer, e := filepath.EvalSymlinks(t.TempDir())
+		if e != nil {
+			t.Fatal(e)
+		}
+		signer = filepath.Join(signer, "issuer")
+		if e = registration.InitSigner(signer); e != nil {
+			t.Fatal(e)
+		}
+		c.cfg.CAFile = filepath.Join(signer, "ca.pem")
+		c.cfg.RegistrationCAFile = c.cfg.CAFile
+		c.cfg.RegistrationSocket = filepath.Join(signer, "sign.sock")
+		c.signNode = func(_ context.Context, req registration.SignRequest) (registration.SignReply, error) {
+			return registration.SignCertificate(signer, req)
+		}
+	}
 	if err = atomicJSON(c.configPath, c.cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +150,49 @@ func TestUIAcceptanceServer(t *testing.T) {
 	}()
 	t.Log("本机隔离 UI 验收已就绪：http://127.0.0.1:19111；用户名 admin，随机密码仅保存在受限文件。")
 	if err = server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatal(err)
+	}
+}
+
+// 浏览器验收生成命令后，用真实加密接入协议完成本机隔离登记。
+func TestUIAcceptanceJoinClient(t *testing.T) {
+	input := os.Getenv("NETSHARE_UI_JOIN_LINK_FILE")
+	if input == "" {
+		t.Skip("仅供显式开启的本机接入验收")
+	}
+	data, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := strings.TrimSpace(string(data))
+	u, err := url.Parse(link)
+	if err != nil || u.Host != "127.0.0.1:19111" || u.Scheme != "http" {
+		t.Fatal("接入验收只能连接本机固定测试端口")
+	}
+	client, err := registration.NewClient(link)
+	if err != nil {
+		t.Fatal("隔离接入链接无效")
+	}
+	report, _ := reportFor(t, "10.60.0.3")
+	var reply registration.Reply
+	if err = client.Request(context.Background(), "register", report, &reply); err != nil {
+		t.Fatal("隔离接入请求失败", err)
+	}
+	var complete struct {
+		OK bool `json:"ok"`
+	}
+	if err = client.Request(context.Background(), "complete", struct{}{}, &complete); err != nil || !complete.OK {
+		t.Fatal("隔离接入完成检查失败", err)
+	}
+	receipt := os.Getenv("NETSHARE_UI_JOIN_RESULT_FILE")
+	if receipt == "" {
+		t.Fatal("缺少隔离验收结果路径")
+	}
+	data, err = json.Marshal(map[string]string{"id": reply.Node.ID, "name": reply.Node.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(receipt, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 }
